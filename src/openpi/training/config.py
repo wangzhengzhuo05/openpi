@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.calvin_policy as calvin_policy  
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -451,8 +452,68 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
         )
-
-
+        
+        
+@dataclasses.dataclass(frozen=True)
+class LeRobotCALVINDataConfig(DataConfigFactory):
+    """Data config for CALVIN dataset in LeRobot format."""
+    
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = None
+    use_depth: bool = True
+    use_tactile: bool = False
+    
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Repack transforms
+        repack_dict = {
+            "images": {
+                "rgb_static": "observation.images.rgb_static",
+                "rgb_gripper": "observation.images.rgb_gripper",
+            },
+            "state": "observation.state",
+            "actions": "action",
+            "prompt": "task",
+        }
+        
+        if self.use_depth:
+            repack_dict["images"]["depth_static"] = "observation.images.depth_static"
+            repack_dict["images"]["depth_gripper"] = "observation.images.depth_gripper"
+        
+        if self.use_tactile:
+            repack_dict["tactile"] = {
+                "rgb": "observation.tactile.rgb",
+                "depth": "observation.tactile.depth",
+            }
+        
+        repack_transform = _transforms.Group(
+            inputs=[_transforms.RepackTransform(repack_dict)]
+        )
+        
+        # Data transforms - use the imported calvin_policy
+        data_transforms = _transforms.Group(
+            inputs=[calvin_policy.CALVINInputs()],  # Use calvin_policy here
+            outputs=[calvin_policy.CALVINOutputs()],  # Use calvin_policy here
+        )
+        
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+        
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+        
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            prompt_from_task=True,
+        )
+    
+    
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -955,6 +1016,43 @@ _CONFIGS = [
         overwrite=True,
         exp_name="debug_pi05",
         wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="pi0_calvin",
+        # Model config: 7D actions (6 joints + 1 gripper), 10-step action horizon
+        model=pi0_config.Pi0Config(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=180,
+        ),
+        # Data config: your CALVIN dataset
+        data=LeRobotCALVINDataConfig(
+            repo_id="Coil1987121/calvin_lerobot",
+            use_depth=True,
+            use_tactile=True,
+            use_delta_joint_actions=True,
+            base_config=DataConfig(
+                prompt_from_task=True,  # Use language instructions from dataset
+            ),
+        ),
+        # Load pre-trained PI0 base model weights
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        # Training hyperparameters
+        num_train_steps=30_000,
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.99,
+        # Logging
+        log_interval=100,
+        save_interval=1000,
+        keep_period=5000,
+        wandb_enabled=True,
     ),
     #
     # RoboArena configs.
