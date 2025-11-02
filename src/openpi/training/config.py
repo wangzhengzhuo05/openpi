@@ -461,17 +461,17 @@ class LeRobotCALVINDataConfig(DataConfigFactory):
     use_delta_joint_actions: bool = True
     default_prompt: str | None = None
     use_depth: bool = True
-    use_tactile: bool = False
+    use_tactile: bool = False  # Set to False since tactile is in state vector
     
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        # Repack transforms
+        # Repack transforms - NO tactile here since it's flattened into state
         repack_dict = {
             "images": {
                 "rgb_static": "observation.images.rgb_static",
                 "rgb_gripper": "observation.images.rgb_gripper",
             },
-            "state": "observation.state",
+            "state": "observation.state",  # This includes flattened tactile!
             "actions": "action",
             "prompt": "task",
         }
@@ -480,20 +480,16 @@ class LeRobotCALVINDataConfig(DataConfigFactory):
             repack_dict["images"]["depth_static"] = "observation.images.depth_static"
             repack_dict["images"]["depth_gripper"] = "observation.images.depth_gripper"
         
-        if self.use_tactile:
-            repack_dict["tactile"] = {
-                "rgb": "observation.tactile.rgb",
-                "depth": "observation.tactile.depth",
-            }
+        # DON'T add tactile to repack - it's already in state vector
         
         repack_transform = _transforms.Group(
             inputs=[_transforms.RepackTransform(repack_dict)]
         )
         
-        # Data transforms - use the imported calvin_policy
+        # Data transforms
         data_transforms = _transforms.Group(
-            inputs=[calvin_policy.CALVINInputs()],  # Use calvin_policy here
-            outputs=[calvin_policy.CALVINOutputs()],  # Use calvin_policy here
+            inputs=[calvin_policy.CALVINInputs(use_tactile=True)],  # Policy handles it
+            outputs=[calvin_policy.CALVINOutputs()],
         )
         
         if self.use_delta_joint_actions:
@@ -511,6 +507,7 @@ class LeRobotCALVINDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             prompt_from_task=True,
+            action_sequence_keys=("action",),  # Singular!
         )
     
     
@@ -1018,40 +1015,42 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
     TrainConfig(
-        name="pi0_calvin",
-        # Model config: 7D actions (6 joints + 1 gripper), 10-step action horizon
+        name="pi0_calvin_scratch",  # New name
         model=pi0_config.Pi0Config(
             action_dim=7,
             action_horizon=10,
             max_token_len=180,
         ),
-        # Data config: your CALVIN dataset
         data=LeRobotCALVINDataConfig(
             repo_id="Coil1987121/calvin_lerobot",
             use_depth=True,
-            use_tactile=True,
+            use_tactile=False,
             use_delta_joint_actions=True,
             base_config=DataConfig(
-                prompt_from_task=True,  # Use language instructions from dataset
+                prompt_from_task=True,
+                action_sequence_keys=("action",),  # Add this line! (singular, not plural)
             ),
         ),
-        # Load pre-trained PI0 base model weights
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        # Training hyperparameters
-        num_train_steps=30_000,
+        # No weight loader = train from scratch
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        
+        # From-scratch training parameters
+        num_train_steps=100_000,
         batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=5e-5,
-            decay_steps=30_000,
+            warmup_steps=5_000,
+            peak_lr=1e-4,
+            decay_steps=100_000,
             decay_lr=1e-6,
         ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        optimizer=_optimizer.AdamW(
+            clip_gradient_norm=1.0,
+            weight_decay=0.01,  # Add weight decay for regularization
+        ),
         ema_decay=0.99,
-        # Logging
         log_interval=100,
-        save_interval=1000,
-        keep_period=5000,
+        save_interval=2000,  # Save less frequently (larger checkpoints)
+        keep_period=10000,
         wandb_enabled=True,
     ),
     #

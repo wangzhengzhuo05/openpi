@@ -12,7 +12,7 @@ from openpi import transforms
 def make_calvin_example() -> dict:
     """Creates a random input example for the CALVIN policy."""
     return {
-        "state": np.random.randn(15).astype(np.float32),  # 15D robot state
+        "state": np.random.randn(15).astype(np.float32),  # 15D robot state (+ tactile if enabled)
         "images": {
             "rgb_static": np.random.randint(256, size=(3, 200, 200), dtype=np.uint8),
             "rgb_gripper": np.random.randint(256, size=(3, 84, 84), dtype=np.uint8),
@@ -27,24 +27,34 @@ class CALVINInputs(transforms.DataTransformFn):
 
     Expected inputs:
     - images: dict[name, img] where img is [channel, height, width]. name must be in EXPECTED_CAMERAS.
-    - state: [15] - robot joint positions and gripper state
-    - actions: [action_horizon, 7] - 6 joint velocities + 1 gripper action
+    - state: [15 + tactile_dims] - robot joint positions/velocities/gripper + flattened tactile
+    - actions: [action_horizon, 7] - 6 joint velocities + 1 gripper command
     - prompt: language instruction string
+    
+    Note: Tactile data is stored as flattened components in the state vector:
+    state = [robot_state (15D), tactile_rgb_flat, tactile_depth_flat]
     """
 
     # CALVIN uses Franka Panda robot
-    # State: 15D (joint positions, velocities, gripper state)
+    # State: 15D robot + optional tactile (flattened)
     # Actions: 7D (6 joint velocities + 1 gripper command)
     
-    # The expected camera names. All input cameras must be in this set.
-    EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("rgb_static", "rgb_gripper")
+    # The expected camera names - now including depth
+    EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("rgb_static", "rgb_gripper", "depth_static", "depth_gripper")
+    
+    # Whether to include tactile data (if False, will use only first 15 dims of state)
+    use_tactile: bool = True
 
     def __call__(self, data: dict) -> dict:
-        data = _decode_calvin(data)
+        data = _decode_calvin(data, use_tactile=self.use_tactile)
 
         in_images = data["images"]
-        if set(in_images) - set(self.EXPECTED_CAMERAS):
-            raise ValueError(f"Expected images to contain {self.EXPECTED_CAMERAS}, got {tuple(in_images)}")
+        
+        # Check that required RGB cameras are present
+        required_cameras = ("rgb_static", "rgb_gripper")
+        missing = set(required_cameras) - set(in_images)
+        if missing:
+            raise ValueError(f"Missing required cameras: {missing}")
 
         # Primary camera is rgb_static
         base_image = in_images["rgb_static"]
@@ -91,15 +101,23 @@ class CALVINOutputs(transforms.DataTransformFn):
         return {"actions": actions}
 
 
-def _decode_calvin(data: dict) -> dict:
+def _decode_calvin(data: dict, use_tactile: bool = True) -> dict:
     """Decode CALVIN data format.
     
-    CALVIN state: [15] - robot joint positions, velocities, gripper
+    CALVIN state: [15 + tactile_dims] - robot + flattened tactile
     CALVIN actions: [action_horizon, 7] - joint velocities + gripper command
+    
+    Args:
+        data: Input data dictionary
+        use_tactile: If False, will use only first 15 dims of state (robot only)
     """
     
-    # State is already in correct format (15D)
+    # State may include flattened tactile data
     state = np.asarray(data["state"])
+    
+    # If not using tactile, truncate to first 15 dims (robot state only)
+    if not use_tactile and len(state) > 15:
+        state = state[:15]
 
     def convert_image(img):
         img = np.asarray(img)
