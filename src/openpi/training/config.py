@@ -1,5 +1,11 @@
 """See _CONFIGS for the list of available configs."""
 
+
+#import openpi.custom_transforms.add_fake_right_wrist as add_fake_right_wrist
+
+
+
+
 import abc
 from collections.abc import Sequence
 import dataclasses
@@ -33,7 +39,47 @@ ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
 
+#########
+import numpy as np
+class AddFakeRightWrist(_transforms.DataTransformFn):
+    """
+    Add a fake right_wrist_0_rgb camera (all zeros) for CALVIN.
+    """
 
+    def __call__(self, batch):
+        # After CALVINInputs, images are in batch["image"] (singular!)
+        if "image" in batch and "right_wrist_0_rgb" not in batch["image"]:
+            # Use left_wrist as template for size
+            if "left_wrist_0_rgb" in batch["image"]:
+                template = batch["image"]["left_wrist_0_rgb"]
+                batch["image"]["right_wrist_0_rgb"] = np.zeros_like(template)
+            else:
+                # Fallback to base camera
+                template = batch["image"]["base_0_rgb"]
+                batch["image"]["right_wrist_0_rgb"] = np.zeros_like(template)
+        
+        # Also handle image_mask
+        if "image_mask" in batch and "right_wrist_0_rgb" not in batch["image_mask"]:
+            batch["image_mask"]["right_wrist_0_rgb"] = np.False_
+        
+        return batch
+
+
+
+class TruncateState(_transforms.DataTransformFn):
+    """Truncate state to first N dimensions (removes tactile)."""
+    
+    def __init__(self, max_dim: int = 15):
+        self.max_dim = max_dim
+    
+    def __call__(self, batch):
+        if "state" in batch:
+            batch["state"] = batch["state"][:self.max_dim]
+        return batch
+
+        
+#########
+        
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
     """Determines the location of assets (e.g., norm stats) that will be used to set up the data pipeline.
@@ -486,9 +532,12 @@ class LeRobotCALVINDataConfig(DataConfigFactory):
             inputs=[_transforms.RepackTransform(repack_dict)]
         )
         
-        # Data transforms
+        # Data transforms with state truncation
         data_transforms = _transforms.Group(
-            inputs=[calvin_policy.CALVINInputs(use_tactile=True)],  # Policy handles it
+            inputs=[
+                calvin_policy.CALVINInputs(use_tactile=True),  # Load full state
+                TruncateState(max_dim=7),  # Truncate to 7D for Pi0
+            ],
             outputs=[calvin_policy.CALVINOutputs()],
         )
         
@@ -500,6 +549,7 @@ class LeRobotCALVINDataConfig(DataConfigFactory):
             )
         
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+        data_transforms = data_transforms.push(inputs=[AddFakeRightWrist()])
         
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
