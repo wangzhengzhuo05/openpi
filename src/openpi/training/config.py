@@ -502,64 +502,63 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
         
 @dataclasses.dataclass(frozen=True)
 class LeRobotCALVINDataConfig(DataConfigFactory):
-    """Data config for CALVIN dataset in LeRobot format."""
-    
+    """
+    Data config for CALVIN dataset in LeRobot format.
+    Unified with DROID schema (observation.images.*, observation.state, actions, task).
+    """
+
     use_delta_joint_actions: bool = True
     default_prompt: str | None = None
-    use_depth: bool = True
-    use_tactile: bool = False  # Set to False since tactile is in state vector
-    
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        # Repack transforms - NO tactile here since it's flattened into state
+        # 1️⃣ Map dataset fields → transform schema
         repack_dict = {
             "images": {
-                "rgb_static": "observation.images.rgb_static",
-                "rgb_gripper": "observation.images.rgb_gripper",
+                "base_0_rgb": "observation.images.base_0_rgb",
+                "left_wrist_0_rgb": "observation.images.left_wrist_0_rgb",
+                "right_wrist_0_rgb": "observation.images.right_wrist_0_rgb",
             },
-            "state": "observation.state",  # This includes flattened tactile!
-            "actions": "action",
+            "state": "observation.state",
+            "actions": "actions",
             "prompt": "task",
         }
-        
-        if self.use_depth:
-            repack_dict["images"]["depth_static"] = "observation.images.depth_static"
-            repack_dict["images"]["depth_gripper"] = "observation.images.depth_gripper"
-        
-        # DON'T add tactile to repack - it's already in state vector
-        
+
         repack_transform = _transforms.Group(
             inputs=[_transforms.RepackTransform(repack_dict)]
         )
-        
-        # Data transforms with state truncation
+
+        # 2️⃣ Data transforms
         data_transforms = _transforms.Group(
             inputs=[
-                calvin_policy.CALVINInputs(use_tactile=True),  # Load full state
-                TruncateState(max_dim=7),  # Truncate to 7D for Pi0
+                calvin_policy.CALVINInputs(),   # clean version, no tactile/depth
+                #TruncateState(max_dim=7),
             ],
             outputs=[calvin_policy.CALVINOutputs()],
         )
-        
+
+        # 3️⃣ Add delta→absolute transforms if enabled
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
             )
-        
+
+        # 4️⃣ Model transforms (tokenization, normalization, etc.)
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
-        data_transforms = data_transforms.push(inputs=[AddFakeRightWrist()])
-        
+
+        # 5️⃣ Return unified config
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             prompt_from_task=True,
-            action_sequence_keys=("action",),  # Singular!
+            action_sequence_keys=("actions",),
         )
-    
+
+
     
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
@@ -1065,27 +1064,14 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
     TrainConfig(
-        name="pi0_calvin_scratch",  # New name
-        model=pi0_config.Pi0Config(
-            action_dim=7,
-            action_horizon=10,
-            max_token_len=180,
-        ),
+        name="pi0_calvin_scratch",
+        model=pi0_config.Pi0Config(action_dim=7, action_horizon=10, max_token_len=180),
         data=LeRobotCALVINDataConfig(
             repo_id="Coil1987121/calvin_lerobot",
-            use_depth=True,
-            use_tactile=False,
-            use_delta_joint_actions=True,
-            base_config=DataConfig(
-                prompt_from_task=True,
-                action_sequence_keys=("action",),  # Add this line! (singular, not plural)
-            ),
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=("actions",)),
         ),
-        # No weight loader = train from scratch
         weight_loader=weight_loaders.NoOpWeightLoader(),
-        
-        # From-scratch training parameters
-        num_train_steps=100_000,
+        num_train_steps=100,
         batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=5_000,
@@ -1093,16 +1079,17 @@ _CONFIGS = [
             decay_steps=100_000,
             decay_lr=1e-6,
         ),
-        optimizer=_optimizer.AdamW(
-            clip_gradient_norm=1.0,
-            weight_decay=0.01,  # Add weight decay for regularization
-        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0, weight_decay=0.01),
         ema_decay=0.99,
-        log_interval=100,
-        save_interval=2000,  # Save less frequently (larger checkpoints)
-        keep_period=10000,
+        log_interval=1,
+        save_interval=2000,
+        keep_period=10_000,
         wandb_enabled=True,
     ),
+
+    
+
+
     #
     # RoboArena configs.
     #
