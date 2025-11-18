@@ -51,17 +51,17 @@ class ProgressTracker:
         self.processed_episodes: List[str] = []
         self.total_frames = 0
         self.start_time = None
-        self.load()  # Load checkpoint immediately so resume metadata is available
+        self.load()
     
     def load(self):
         """加载已有的进度"""
-        if self.checkpoint_file.exists():  # Path.exists() verifies checkpoint presence before I/O
-            with open(self.checkpoint_file, 'r') as f:  # open() reads persisted JSON metadata
-                data = json.load(f)  # json.load() deserializes checkpoint into a dict
-                self.processed_episodes = data.get('processed_episodes', [])  # dict.get() avoids KeyError when field missing
+        if self.checkpoint_file.exists():
+            with open(self.checkpoint_file, 'r') as f:
+                data = json.load(f)
+                self.processed_episodes = data.get('processed_episodes', [])
                 self.total_frames = data.get('total_frames', 0)
                 self.start_time = data.get('start_time')
-                print(f"📂 Found existing progress: {len(self.processed_episodes)} episodes completed")  # print() informs operator about resume state
+                print(f"📂 Found existing progress: {len(self.processed_episodes)} episodes completed")
     
     def save(self):
         """保存当前进度"""
@@ -69,20 +69,20 @@ class ProgressTracker:
             'processed_episodes': self.processed_episodes,
             'total_frames': self.total_frames,
             'start_time': self.start_time,
-            'last_update': datetime.now().isoformat()  # datetime.now().isoformat() captures precise save timestamp
+            'last_update': datetime.now().isoformat()
         }
-        self.checkpoint_file.parent.mkdir(parents=True, exist_ok=True)  # Path.mkdir() ensures checkpoint directory exists
-        with open(self.checkpoint_file, 'w') as f:  # open() prepares writable file handle for checkpoint data
-            json.dump(data, f, indent=2)  # json.dump() persists progress so resumes stay consistent
+        self.checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.checkpoint_file, 'w') as f:
+            json.dump(data, f, indent=2)
     
     def add_episode(self, episode_id: str, num_frames: int):
         """记录已处理的episode"""
         if episode_id not in self.processed_episodes:
-            self.processed_episodes.append(episode_id)  # list.append() tracks completion order for episodes
+            self.processed_episodes.append(episode_id)
             self.total_frames += num_frames
             if self.start_time is None:
-                self.start_time = datetime.now().isoformat()  # Record when conversion first started
-            self.save()  # Persist progress immediately so resume survives interruptions
+                self.start_time = datetime.now().isoformat()
+            self.save()
     
     def is_processed(self, episode_id: str) -> bool:
         """检查episode是否已处理"""
@@ -90,8 +90,8 @@ class ProgressTracker:
     
     def clear(self):
         """清除进度记录"""
-        if self.checkpoint_file.exists():  # Path.exists() avoids FileNotFoundError on deletion
-            self.checkpoint_file.unlink()  # Path.unlink() removes checkpoint file when starting fresh
+        if self.checkpoint_file.exists():
+            self.checkpoint_file.unlink()
         self.processed_episodes = []
         self.total_frames = 0
         self.start_time = None
@@ -110,7 +110,7 @@ def confirm_action(prompt: str, default: bool = False) -> bool:
     """
     default_str = "[Y/n]" if default else "[y/N]"
     while True:
-        response = input(f"{prompt} {default_str}: ").strip().lower()  # input() shows prompt and returns sanitized user choice
+        response = input(f"{prompt} {default_str}: ").strip().lower()
         if response == '':
             return default
         if response in ['y', 'yes']:
@@ -130,20 +130,20 @@ def backup_dataset(output_path: Path) -> Path:
     Returns:
         备份路径
     """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # datetime.strftime() generates readable backup timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = output_path.parent / f"{output_path.name}_backup_{timestamp}"
     
     print(f"📦 Creating backup: {backup_path}")
-    shutil.copytree(output_path, backup_path)  # shutil.copytree() recursively copies dataset contents
-    print(f"✓ Backup created successfully")  # print() confirms backup completion
+    shutil.copytree(output_path, backup_path)
+    print(f"✓ Backup created successfully")
     
     return backup_path
 
 
 def load_episode_json(json_path: Path) -> Dict[str, Any]:
     """Load episode JSON file."""
-    with open(json_path, 'r') as f:  # open() reads serialized trajectory metadata
-        return json.load(f)  # json.load() parses CALVIN episode JSON into Python dict
+    with open(json_path, 'r') as f:
+        return json.load(f)
 
 
 def load_and_preprocess_image(
@@ -152,23 +152,23 @@ def load_and_preprocess_image(
     quality: int = 95
 ) -> np.ndarray:
     """Load and resize image with memory optimization."""
-    img = Image.open(image_path)  # PIL.Image.open() lazily loads PNG without copying entire file
+    img = Image.open(image_path)
     
     if img.size[0] > target_size[1] * 2 or img.size[1] > target_size[0] * 2:
-        img.thumbnail((target_size[1] * 2, target_size[0] * 2), Image.LANCZOS)  # thumbnail() downscales large frames using LANCZOS filter
+        img.thumbnail((target_size[1] * 2, target_size[0] * 2), Image.LANCZOS)
     
-    img = img.resize((target_size[1], target_size[0]), Image.BILINEAR)  # resize() enforces LeRobot image shape contract
-    img_array = np.array(img, dtype=np.uint8)  # np.array() converts PIL object into numpy tensor
+    img = img.resize((target_size[1], target_size[0]), Image.BILINEAR)
+    img_array = np.array(img, dtype=np.uint8)
     
-    img.close()  # Explicit close() releases underlying file handle promptly
-    del img  # Hint GC to reclaim associated buffers quickly
+    img.close()
+    del img
     
     return img_array
 
 
 def get_frame_number(filename: str) -> int:
     """Extract frame number from filename."""
-    return int(filename.split('_')[1].split('.')[0])  # int() converts parsed substring to numeric frame index
+    return int(filename.split('_')[1].split('.')[0])
 
 
 def pad_or_truncate_state(state: np.ndarray, target_dim: int = 32) -> np.ndarray:
@@ -178,10 +178,10 @@ def pad_or_truncate_state(state: np.ndarray, target_dim: int = 32) -> np.ndarray
     if current_dim == target_dim:
         return state
     elif current_dim < target_dim:
-        padding = np.zeros(target_dim - current_dim, dtype=np.float32)  # np.zeros() creates zero padding for shorter states
-        return np.concatenate([state, padding])  # np.concatenate() appends padding to reach target size
+        padding = np.zeros(target_dim - current_dim, dtype=np.float32)
+        return np.concatenate([state, padding])
     else:
-        return state[:target_dim]  # Slice operation truncates surplus dimensions deterministically
+        return state[:target_dim]
 
 
 def select_episodes(
@@ -195,8 +195,8 @@ def select_episodes(
     """Select episodes based on various criteria."""
     if sample_ratio is not None or sample_count is not None:
         if random_seed is not None:
-            random.seed(random_seed)  # random.seed() ensures reproducible Python RNG state for sampling
-            np.random.seed(random_seed)  # np.random.seed() matches numpy RNG state to Python RNG
+            random.seed(random_seed)
+            np.random.seed(random_seed)
         
         if sample_count is not None:
             num_samples = min(sample_count, len(json_files))
@@ -209,8 +209,8 @@ def select_episodes(
         if random_seed is not None:
             print(f"   Random seed: {random_seed}")
         
-        selected_files = random.sample(json_files, num_samples)  # random.sample() chooses subset without replacement
-        selected_files = sorted(selected_files)  # sorted() restores deterministic ordering for processing
+        selected_files = random.sample(json_files, num_samples)
+        selected_files = sorted(selected_files)
         
         return selected_files
     else:
@@ -240,7 +240,7 @@ def handle_existing_dataset(
     Returns:
         是否应该继续（True）或退出（False）
     """
-    if not output_path.exists():  # Path.exists() quickly exits when no dataset is present
+    if not output_path.exists():
         return True
     
     print(f"\n⚠️  Found existing dataset at: {output_path}")
@@ -258,7 +258,7 @@ def handle_existing_dataset(
     # 显示数据集信息
     try:
         # 尝试统计文件数量
-        total_size = sum(f.stat().st_size for f in output_path.rglob('*') if f.is_file())  # Path.rglob()/Path.stat() iterate and measure bytes of every file
+        total_size = sum(f.stat().st_size for f in output_path.rglob('*') if f.is_file())
         total_size_mb = total_size / (1024 * 1024)
         print(f"   Size: {total_size_mb:.2f} MB")
     except Exception as e:
@@ -267,9 +267,9 @@ def handle_existing_dataset(
     # 强制删除模式
     if force_delete:
         if create_backup:
-            backup_dataset(output_path)  # backup_dataset() clones dataset before removal when requested
+            backup_dataset(output_path)
         print(f"🗑️  Force delete mode: Removing existing dataset")
-        shutil.rmtree(output_path)  # shutil.rmtree() recursively deletes existing LeRobot repo
+        shutil.rmtree(output_path)
         return True
     
     # 询问用户
@@ -280,21 +280,21 @@ def handle_existing_dataset(
     print("  4. Cancel and exit")
     
     while True:
-        choice = input("\nYour choice [1/2/3/4]: ").strip()  # input() captures interactive decision from operator
+        choice = input("\nYour choice [1/2/3/4]: ").strip()
         
         if choice == '1':
-            if confirm_action("⚠️  Are you sure you want to DELETE the existing dataset?", default=False):  # confirm_action() asks for destruction confirmation
+            if confirm_action("⚠️  Are you sure you want to DELETE the existing dataset?", default=False):
                 print(f"🗑️  Removing existing dataset...")
-                shutil.rmtree(output_path)  # shutil.rmtree() performs irreversible deletion once confirmed
+                shutil.rmtree(output_path)
                 return True
             else:
                 print("Operation cancelled")
                 return False
         
         elif choice == '2':
-            backup_dataset(output_path)  # backup_dataset() safeguards repo before deletion
+            backup_dataset(output_path)
             print(f"🗑️  Removing existing dataset...")
-            shutil.rmtree(output_path)  # shutil.rmtree() clears dataset after backup
+            shutil.rmtree(output_path)
             return True
         
         elif choice == '3':
@@ -380,23 +380,23 @@ def main(
            python script.py --create_backup
     """
     
-    data_path = Path(data_dir)  # Path() converts CLI argument into pathlib object for filesystem work
+    data_path = Path(data_dir)
     
     if not data_path.exists():
-        raise ValueError(f"Data directory does not exist: {data_dir}")  # Fail fast when CALVIN source is missing
+        raise ValueError(f"Data directory does not exist: {data_dir}")
     
     # 设置检查点文件路径
-    output_path = HF_LEROBOT_HOME / repo_name  # HF_LEROBOT_HOME / repo builds Hugging Face repo path lazily
+    output_path = HF_LEROBOT_HOME / repo_name
     if checkpoint_dir is None:
-        checkpoint_file = output_path.parent / f".{repo_name.replace('/', '_')}_checkpoint.json"  # Store checkpoint alongside dataset by default
+        checkpoint_file = output_path.parent / f".{repo_name.replace('/', '_')}_checkpoint.json"
     else:
-        checkpoint_file = Path(checkpoint_dir) / f"{repo_name.replace('/', '_')}_checkpoint.json"  # Allow overriding checkpoint location
+        checkpoint_file = Path(checkpoint_dir) / f"{repo_name.replace('/', '_')}_checkpoint.json"
     
     # 初始化进度跟踪器
-    progress = ProgressTracker(checkpoint_file)  # Track conversion progress tied to computed checkpoint file
+    progress = ProgressTracker(checkpoint_file)
     
     # 处理已存在的数据集（安全功能）
-    if not handle_existing_dataset(  # handle_existing_dataset() enforces safety prompts before writing to HF repo
+    if not handle_existing_dataset(
         output_path=output_path,
         no_delete=no_delete,
         force_delete=force_delete,
@@ -408,11 +408,11 @@ def main(
     
     # 如果不是恢复模式且删除了数据集，清除进度
     if not resume and not no_delete and not output_path.exists():
-        progress.clear()  # Reset checkpoint file when starting from scratch
+        progress.clear()
         print("🔄 Progress cleared for fresh start")
     
     # Get episode files
-    json_files = sorted(data_path.glob("lang_ann_*.json"))  # Path.glob() enumerates CALVIN episode annotations; sorted() stabilizes order
+    json_files = sorted(data_path.glob("lang_ann_*.json"))
     if not json_files:
         raise ValueError(f"No episode JSON files found in {data_dir}")
     
@@ -423,7 +423,7 @@ def main(
         print(f"   Remaining: {len(json_files) - len(progress.processed_episodes)} episodes")
     
     # Load first episode to determine dimensions
-    first_episode = load_episode_json(json_files[0])  # Inspect the first episode to understand observation shapes
+    first_episode = load_episode_json(json_files[0])
     print(f"\n🤖 Robot state dimension: {state_dim}")
     
     # Check tactile dimensions if enabled
@@ -432,19 +432,19 @@ def main(
     if include_tactile:
         images_dir = data_path / "images" / first_episode["episode_id"]
         tactile_rgb_dir = images_dir / "tactile_rgb"
-        if tactile_rgb_dir.exists():  # Path.exists() ensures tactile RGB data is available
-            sample_files = sorted(list(tactile_rgb_dir.glob("*.npy")))  # Path.glob() finds tactile frames for probing dims
+        if tactile_rgb_dir.exists():
+            sample_files = sorted(list(tactile_rgb_dir.glob("*.npy")))
             if sample_files:
-                sample_data = np.load(sample_files[0])  # np.load() loads tactile array to inspect flattened length
+                sample_data = np.load(sample_files[0])
                 tactile_rgb_dim = sample_data.size
                 print(f"   Tactile RGB dimension: {tactile_rgb_dim}")
                 del sample_data
         
         tactile_depth_dir = images_dir / "tactile_depth"
-        if tactile_depth_dir.exists():  # Path.exists() again ensures tactile depth data is present
+        if tactile_depth_dir.exists():
             sample_files = sorted(list(tactile_depth_dir.glob("*.npy")))
             if sample_files:
-                sample_data = np.load(sample_files[0])  # np.load() extracts sample depth tactile map
+                sample_data = np.load(sample_files[0])
                 tactile_depth_dim = sample_data.size
                 print(f"   Tactile depth dimension: {tactile_depth_dim}")
                 del sample_data

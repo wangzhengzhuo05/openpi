@@ -190,6 +190,53 @@ def train_step(
     }
     return new_state, info
 
+# ========== 在此处添加验证函数（在 main 函数之前）==========
+@at.typecheck
+def compute_validation_loss(
+    config: _config.TrainConfig,
+    train_state: training_utils.TrainState,
+    val_data_loader,
+    train_rng: at.KeyArrayLike,
+    mesh: jax.sharding.Mesh,
+) -> float:
+    """计算验证集的平均损失"""
+    
+    model = nnx.merge(train_state.model_def, train_state.params)
+    model.eval()  # 切换到评估模式
+    
+    @at.typecheck
+    def eval_loss_fn(
+        model: _model.BaseModel, 
+        rng: at.KeyArrayLike, 
+        observation: _model.Observation, 
+        actions: _model.Actions
+    ):
+        chunked_loss = model.compute_loss(rng, observation, actions, train=False)
+        return jnp.mean(chunked_loss)
+    
+    total_loss = 0.0
+    num_batches = 0
+    
+    # 遍历验证集
+    val_iter = iter(val_data_loader)
+    for i in range(config.val_num_batches):
+        try:
+            val_batch = next(val_iter)
+            observation, actions = val_batch
+            
+            # 计算损失（不需要梯度）
+            eval_rng = jax.random.fold_in(train_rng, i)
+            loss = eval_loss_fn(model, eval_rng, observation, actions)
+            
+            total_loss += float(jax.device_get(loss))
+            num_batches += 1
+            
+        except StopIteration:
+            break
+    
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+    return avg_loss
+# ========== 验证函数添加结束 ==========
 
 def main(config: _config.TrainConfig):
     init_logging()
@@ -222,8 +269,55 @@ def main(config: _config.TrainConfig):
         sharding=data_sharding,
         shuffle=True,
     )
-    data_iter = iter(data_loader)
-    batch = next(data_iter)
+    # ========== 验证数据加载器（简化版）==========
+    val_data_loader = None
+    if config.val_repo_id is not None:
+        try:
+            logging.info(f"Loading validation dataset: {config.val_repo_id}")
+            
+            # 创建验证配置，保持训练配置的其他设置
+            val_data_factory = dataclasses.replace(
+                config.data,
+                repo_id=config.val_repo_id,
+            )
+            
+            val_config = dataclasses.replace(
+                config,
+                data=val_data_factory,
+                batch_size=config.val_batch_size or config.batch_size,
+            )
+            
+            val_data_loader = _data_loader.create_data_loader(
+                val_config,
+                sharding=data_sharding,
+                shuffle=False,
+            )
+            
+            logging.info(f"Validation dataset loaded successfully")
+            
+        except Exception as e:
+            logging.warning(f"Failed to load validation dataset: {e}")
+            logging.warning("Training will continue without validation")
+            import traceback
+            logging.warning(traceback.format_exc())
+    # ========== 验证数据加载器结束 ==========
+    #data_iter = iter(data_loader)
+    # 创建无限循环的数据迭代器
+    def infinite_dataloader(dataloader):
+        """无限循环遍历数据加载器"""
+        while True:
+            for batch in dataloader:
+                yield batch
+    
+    data_iter = infinite_dataloader(data_loader)
+    #batch = next(data_iter)
+    try:
+        batch = next(data_iter)
+    except StopIteration:
+        logging.error("数据迭代器意外停止！")
+        raise
+
+
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
@@ -267,6 +361,24 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+            
+        # ========== 在此处添加验证逻辑 ==========
+        if (val_data_loader is not None and 
+            step % config.val_freq == 0 and 
+            step > 0):
+            
+            val_loss = compute_validation_loss(
+                config=config,
+                train_state=train_state,
+                val_data_loader=val_data_loader,
+                train_rng=train_rng,
+                mesh=mesh,
+            )
+            
+            pbar.write(f"Step {step}: Validation loss = {val_loss:.6f}")
+            wandb.log({"val_loss": val_loss}, step=step)
+        # ========== 验证逻辑添加结束 ==========
+        
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

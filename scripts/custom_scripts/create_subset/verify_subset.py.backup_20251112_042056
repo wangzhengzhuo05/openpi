@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""
+验证创建的子数据集
+
+Usage:
+    python verify_subset.py Coil1987121/calvin_5percent_seed42_training
+"""
+
+import sys
+import json
+from pathlib import Path
+from collections import Counter
+
+
+def verify_subset(repo_id: str):
+    """验证子数据集的完整性和统计信息"""
+    
+    print("=" * 70)
+    print(f"🔍 验证数据集: {repo_id}")
+    print("=" * 70)
+    
+    try:
+        from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
+        cache_dir = HF_LEROBOT_HOME
+    except ImportError:
+        from huggingface_hub import constants
+        cache_dir = Path(constants.HF_HOME) / "lerobot"
+    
+    dataset_path = cache_dir / repo_id
+    
+    # 1. 检查路径是否存在
+    print(f"\n📁 检查路径...")
+    if not dataset_path.exists():
+        print(f"   ❌ 数据集不存在: {dataset_path}")
+        print(f"\n💡 提示:")
+        print(f"   1. 运行 'python create_subset_hf_cache.py --list' 查看所有数据集")
+        print(f"   2. 确保已创建该子数据集")
+        return False
+    print(f"   ✅ 路径存在: {dataset_path}")
+    
+    # 2. 检查基本结构
+    print(f"\n📂 检查目录结构...")
+    required_dirs = ["data", "meta"]
+    for dir_name in required_dirs:
+        dir_path = dataset_path / dir_name
+        if dir_path.exists():
+            print(f"   ✅ {dir_name}/ 存在")
+        else:
+            print(f"   ❌ {dir_name}/ 缺失")
+    
+    # 3. 读取元数据
+    print(f"\n📊 读取元数据...")
+    
+    # 子集元数据
+    subset_meta_path = dataset_path / "subset_metadata.json"
+    if subset_meta_path.exists():
+        with open(subset_meta_path, 'r') as f:
+            subset_meta = json.load(f)
+        
+        print(f"\n   🎯 采样信息:")
+        print(f"   源数据集: {subset_meta.get('source_repo_id', 'N/A')}")
+        print(f"   采样比例: {subset_meta.get('fraction', 0)*100:.1f}%")
+        print(f"   随机种子: {subset_meta.get('seed', 'N/A')}")
+        print(f"\n   📈 统计:")
+        print(f"   Episodes: {subset_meta.get('total_episodes', '?')} / {subset_meta.get('original_episodes', '?')}")
+        print(f"   Frames: {subset_meta.get('total_frames', '?')} / {subset_meta.get('original_frames', '?')}")
+        print(f"   实际比例: {subset_meta.get('actual_fraction', 0)*100:.2f}%")
+        
+        sampled_episodes = subset_meta.get('sampled_episode_ids', [])
+        if sampled_episodes:
+            print(f"\n   🎲 采样的 episodes (前20个):")
+            print(f"   {sampled_episodes[:20]}")
+    else:
+        print(f"   ⚠️  未找到 subset_metadata.json")
+    
+    # 数据集信息
+    info_path = dataset_path / "meta" / "info.json"
+    if info_path.exists():
+        with open(info_path, 'r') as f:
+            info = json.load(f)
+        
+        print(f"\n   ℹ️  数据集信息:")
+        print(f"   Episodes: {info.get('total_episodes', '?')}")
+        print(f"   Frames: {info.get('total_frames', '?')}")
+        print(f"   FPS: {info.get('fps', '?')}")
+        print(f"   Robot: {info.get('robot_type', '?')}")
+    
+    # 4. 加载并验证数据集
+    print(f"\n📦 加载数据集...")
+    try:
+        from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
+        import os
+        
+        # 设置离线模式，避免访问 HuggingFace Hub
+        old_hf_hub_offline = os.environ.get('HF_HUB_OFFLINE')
+        os.environ['HF_HUB_OFFLINE'] = '1'
+        
+        try:
+            # 使用 LeRobotDataset 加载
+            print(f"   ⏳ 正在加载...", end=" ", flush=True)
+            dataset = LeRobotDataset(repo_id, root=HF_LEROBOT_HOME, local_files_only=True)
+            print(f"✅")
+        finally:
+            # 恢复环境变量
+            if old_hf_hub_offline is None:
+                os.environ.pop('HF_HUB_OFFLINE', None)
+            else:
+                os.environ['HF_HUB_OFFLINE'] = old_hf_hub_offline
+        
+        print(f"\n   📊 数据集统计:")
+        print(f"   总帧数: {len(dataset)}")
+        print(f"   总 episodes: {dataset.num_episodes}")
+        print(f"   FPS: {dataset.fps}")
+        print(f"   Robot: {dataset.robot_type}")
+        
+        # 获取底层的 HuggingFace Dataset
+        hf_dataset = dataset.hf_dataset
+        print(f"\n   📋 数据字段: {hf_dataset.column_names}")
+        
+        # 统计 episodes
+        episodes = sorted(set(hf_dataset['episode_index']))
+        print(f"\n   📈 Episode 信息:")
+        print(f"   唯一 episodes: {len(episodes)}")
+        print(f"   Episode ID 范围: {min(episodes)} - {max(episodes)}")
+        
+        # 每个 episode 的帧数
+        episode_counts = Counter(hf_dataset['episode_index'])
+        frames_per_ep = list(episode_counts.values())
+        print(f"   每个 episode 平均帧数: {sum(frames_per_ep)/len(frames_per_ep):.1f}")
+        print(f"   帧数范围: {min(frames_per_ep)} - {max(frames_per_ep)}")
+        
+        # 任务分布
+        if 'task' in hf_dataset.column_names:
+            tasks = [sample['task'] for sample in hf_dataset.select(range(min(1000, len(hf_dataset))))]
+            task_counts = Counter(tasks)
+            print(f"\n   📝 任务分布 (前 10 个任务，基于前 1000 样本):")
+            for task, count in task_counts.most_common(10):
+                task_str = task[:60] + "..." if len(task) > 60 else task
+                print(f"      {count:5d} x {task_str}")
+        
+        # 检查第一个样本
+        print(f"\n   🔍 第一个样本的字段:")
+        first_sample = hf_dataset[0]
+        for key, value in sorted(first_sample.items()):
+            if hasattr(value, 'shape'):
+                print(f"      {key}: shape={value.shape}, dtype={value.dtype}")
+            elif hasattr(value, '__len__') and not isinstance(value, str):
+                print(f"      {key}: length={len(value)}, type={type(value).__name__}")
+            else:
+                value_str = str(value)[:60]
+                if len(str(value)) > 60:
+                    value_str += "..."
+                print(f"      {key}: {value_str}")
+        
+        # Features 信息
+        print(f"\n   🔧 数据集 Features:")
+        for key, feature in dataset.features.items():
+            print(f"      {key}:")
+            print(f"         dtype: {feature.get('dtype', 'N/A')}")
+            print(f"         shape: {feature.get('shape', 'N/A')}")
+        
+    except ImportError:
+        print(f"\n   ❌ 加载失败: lerobot 库未安装")
+        print(f"   💡 请运行: pip install lerobot")
+        return False
+    except Exception as e:
+        print(f"\n   ❌ 加载失败: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        print(f"\n💡 故障排查:")
+        print(f"   1. 检查 meta/info.json 是否存在: {dataset_path}/meta/info.json")
+        print(f"   2. 检查网络连接（如果需要）")
+        print(f"   3. 确保数据集结构完整")
+        return False
+    
+    # 5. 总结
+    print("\n" + "=" * 70)
+    print("✅ 验证完成！")
+    print("=" * 70)
+    
+    print(f"\n💡 在训练配置中使用:")
+    print(f"```python")
+    print(f"repo_id=\"{repo_id}\"")
+    print(f"```")
+    
+    return True
+
+
+def compare_subsets(repo_ids: list):
+    """比较多个子数据集"""
+    
+    print("\n" + "=" * 70)
+    print("📊 对比子数据集")
+    print("=" * 70)
+    
+    try:
+        from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
+        import os
+    except ImportError:
+        print("❌ 需要安装 lerobot 库")
+        return
+    
+    datasets_info = []
+    
+    # 设置离线模式
+    old_hf_hub_offline = os.environ.get('HF_HUB_OFFLINE')
+    os.environ['HF_HUB_OFFLINE'] = '1'
+    
+    try:
+        for repo_id in repo_ids:
+            dataset_path = HF_LEROBOT_HOME / repo_id
+            if not dataset_path.exists():
+                print(f"\n⚠️  跳过 {repo_id} (不存在)")
+                continue
+            
+            try:
+                print(f"\n⏳ 加载 {repo_id}...", end=" ", flush=True)
+                dataset = LeRobotDataset(repo_id, root=HF_LEROBOT_HOME, local_files_only=True)
+                print("✅")
+                
+                # 读取元数据
+                subset_meta_path = dataset_path / "subset_metadata.json"
+                if subset_meta_path.exists():
+                    with open(subset_meta_path, 'r') as f:
+                        meta = json.load(f)
+                else:
+                    meta = {}
+                
+                episodes = set(dataset.hf_dataset['episode_index'])
+                
+                info = {
+                    'repo_id': repo_id,
+                    'episodes': len(episodes),
+                    'frames': len(dataset),
+                    'fraction': meta.get('fraction', '?'),
+                    'seed': meta.get('seed', '?'),
+                    'episode_ids': episodes
+                }
+                datasets_info.append(info)
+                
+            except Exception as e:
+                print(f"\n⚠️  加载 {repo_id} 失败: {e}")
+    finally:
+        # 恢复环境变量
+        if old_hf_hub_offline is None:
+            os.environ.pop('HF_HUB_OFFLINE', None)
+        else:
+            os.environ['HF_HUB_OFFLINE'] = old_hf_hub_offline
+    
+    if not datasets_info:
+        print("\n没有成功加载任何数据集")
+        return
+    
+    # 打印对比表
+    print(f"\n{'Repo ID':<50} {'Episodes':>10} {'Frames':>10} {'Fraction':>10} {'Seed':>8}")
+    print("-" * 90)
+    for info in datasets_info:
+        fraction_str = f"{info['fraction']*100:.1f}%" if isinstance(info['fraction'], float) else str(info['fraction'])
+        print(f"{info['repo_id']:<50} {info['episodes']:>10} {info['frames']:>10} {fraction_str:>10} {info['seed']:>8}")
+    
+    # 检查重叠
+    if len(datasets_info) >= 2:
+        print(f"\n🔄 Episode 重叠分析:")
+        for i in range(len(datasets_info)):
+            for j in range(i+1, len(datasets_info)):
+                name1 = datasets_info[i]['repo_id'].split('/')[-1]
+                name2 = datasets_info[j]['repo_id'].split('/')[-1]
+                
+                eps1 = datasets_info[i]['episode_ids']
+                eps2 = datasets_info[j]['episode_ids']
+                
+                overlap = eps1 & eps2
+                overlap_pct = len(overlap) / min(len(eps1), len(eps2)) * 100 if min(len(eps1), len(eps2)) > 0 else 0
+                
+                print(f"\n   {name1} vs {name2}:")
+                print(f"   重叠 episodes: {len(overlap)} ({overlap_pct:.1f}%)")
+                if len(overlap) > 0 and len(overlap) <= 20:
+                    print(f"   重叠的 episode IDs: {sorted(list(overlap))}")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python verify_subset.py <repo_id> [repo_id2] [repo_id3] ...")
+        print("\nExamples:")
+        print("  # 验证单个数据集")
+        print("  python verify_subset.py Coil1987121/calvin_5percent_seed42_training")
+        print()
+        print("  # 对比多个数据集")
+        print("  python verify_subset.py \\")
+        print("      Coil1987121/calvin_5percent_seed42_training \\")
+        print("      Coil1987121/calvin_10percent_seed42_training \\")
+        print("      Coil1987121/calvin_5percent_seed123_training")
+        sys.exit(1)
+    
+    repo_ids = sys.argv[1:]
+    
+    if len(repo_ids) == 1:
+        # 单个数据集验证
+        verify_subset(repo_ids[0])
+    else:
+        # 多个数据集对比
+        for repo_id in repo_ids:
+            print()
+            verify_subset(repo_id)
+        
+        # 对比分析
+        compare_subsets(repo_ids)
+
+
+if __name__ == "__main__":
+    main()

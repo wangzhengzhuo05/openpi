@@ -631,6 +631,19 @@ class TrainConfig:
     # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
+    
+    # 添加以下验证集相关配置
+    # 验证集的 LeRobot 数据集路径或 HuggingFace repo ID
+    val_repo_id: str | None = None
+    
+    # 验证频率（每隔多少个训练步骤验证一次）
+    val_freq: int = 1000
+    
+    # 验证时使用的批次大小（可以比训练批次大）
+    val_batch_size: int | None = None  # 如果为 None，则使用 batch_size
+    
+    # 验证时使用的最大样本数（避免验证太久）
+    val_num_batches: int = 10 # 每次验证最多使用的批次数量
 
     @property
     def assets_dirs(self) -> pathlib.Path:
@@ -1066,28 +1079,206 @@ _CONFIGS = [
     TrainConfig(
         name="pi0_calvin_scratch",
         model=pi0_config.Pi0Config(action_dim=7, action_horizon=10, max_token_len=180),
+        
         data=LeRobotCALVINDataConfig(
-            repo_id="Coil1987121/calvin_lerobot",
-            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=("actions",)),
+            repo_id="Coil1987121/calvin_lerobot_task_ABCD_D_training",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("actions",),
+                
+            ),
+            # ✅ 资源配置
+            assets=AssetsConfig(
+                # 使用相对路径或省略（会自动使用 ./assets/pi0_calvin_scratch）
+                # assets_dir="./assets/pi0_calvin_scratch",  # 可以省略
+                asset_id="Coil1987121/calvin_lerobot_task_ABCD_D_training",
+            ),
         ),
+        
+        # ========== 验证配置 ==========
+        val_repo_id="Coil1987121/calvin_lerobot_task_ABCD_D_validation",
+        val_freq=500,           # ✅ 改：每 500 步验证
+        val_batch_size=32,      # ✅ 改：与训练批次接近
+        val_num_batches=20,     # ✅ 改：减少验证批次
+        
+        # ========== 训练超参数 ==========
         weight_loader=weight_loaders.NoOpWeightLoader(),
-        num_train_steps=100,
-        batch_size=32,
+        num_train_steps=50_000,
+        batch_size=32,          # ✅ 如果 GPU 内存够用，保持 64
+        
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=5_000,
+            warmup_steps=2_500,  # ✅ 改：5% 的训练步数
             peak_lr=1e-4,
-            decay_steps=100_000,
+            decay_steps=50_000,  # ✅ 改：必须与 num_train_steps 匹配
             decay_lr=1e-6,
         ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0, weight_decay=0.01),
+        
+        optimizer=_optimizer.AdamW(
+            clip_gradient_norm=1.0,
+            weight_decay=0.01
+        ),
+        
         ema_decay=0.99,
-        log_interval=1,
-        save_interval=2000,
-        keep_period=10_000,
+        
+        # ========== 日志和保存 ==========
+        log_interval=50,
+        save_interval=1_000,
+        keep_period=2_000,
         wandb_enabled=True,
     ),
-
-    
+    TrainConfig(
+        name="pi0_calvin_scratch_5percent",
+        model=pi0_config.Pi0Config(action_dim=7, action_horizon=10, max_token_len=180),
+        
+        data=LeRobotCALVINDataConfig(
+            repo_id="Coil1987121/calvin_lerobot_task_ABCD_D_training_5percent",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("actions",),
+                
+            ),
+            # ✅ 资源配置
+            assets=AssetsConfig(
+                # 使用相对路径或省略（会自动使用 ./assets/pi0_calvin_scratch）
+                # assets_dir="./assets/pi0_calvin_scratch",  # 可以省略
+                asset_id="Coil1987121/calvin_lerobot_task_ABCD_D_training_5percent",
+            ),
+        ),
+        
+        # ========== 验证配置 ==========
+        val_repo_id="Coil1987121/calvin_lerobot_task_ABCD_D_validation",
+        val_freq=100,           # ✅ 改：每 100 步验证
+        val_batch_size=32,      # ✅ 改：与训练批次接近
+        val_num_batches=20,     # ✅ 改：减少验证批次
+        
+        # ========== 训练超参数 ==========
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-tmp/openpi/checkpoints/pi0_calvin_scratch_5percent/calvin_5percent/2000/params"),
+        num_train_steps=5_000,
+        batch_size=32,          # ✅ 如果 GPU 内存够用，保持 64
+        
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=250,  # ✅ 改：5% 的训练步数
+            peak_lr=1e-4,
+            decay_steps=5_000,  # ✅ 改：必须与 num_train_steps 匹配
+            decay_lr=1e-6,
+        ),
+        
+        optimizer=_optimizer.AdamW(
+            clip_gradient_norm=1.0,
+            weight_decay=0.01
+        ),
+        
+        
+        ema_decay=0.99,
+        
+        # ========== 日志和保存 ==========
+        log_interval=10,
+        save_interval=500,
+        keep_period=500,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="pi0_calvin_scratch_10percent",
+        model=pi0_config.Pi0Config(action_dim=7, action_horizon=10, max_token_len=180),
+        
+        data=LeRobotCALVINDataConfig(
+            repo_id="Coil1987121/calvin_lerobot_task_ABCD_D_training_10percent",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("actions",),
+                
+            ),
+            # ✅ 资源配置
+            assets=AssetsConfig(
+                # 使用相对路径或省略（会自动使用 ./assets/pi0_calvin_scratch）
+                # assets_dir="./assets/pi0_calvin_scratch",  # 可以省略
+                asset_id="Coil1987121/calvin_lerobot_task_ABCD_D_training_10percent",
+            ),
+        ),
+        
+        # ========== 验证配置 ==========
+        val_repo_id="Coil1987121/calvin_lerobot_task_ABCD_D_validation",
+        val_freq=200,           # ✅ 改：每 200 步验证
+        val_batch_size=32,      # ✅ 改：与训练批次接近
+        val_num_batches=20,     # ✅ 改：减少验证批次
+        
+        # ========== 训练超参数 ==========
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-tmp/openpi/checkpoints/pi0_calvin_scratch_10percent/calvin_10percent/5000/params"),
+        num_train_steps=10_000,
+        batch_size=32,          # ✅ 如果 GPU 内存够用，保持 64
+        
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,  # ✅ 改：5% 的训练步数
+            peak_lr=1e-4,
+            decay_steps=10_000,  # ✅ 改：必须与 num_train_steps 匹配
+            decay_lr=1e-6,
+        ),
+        
+        optimizer=_optimizer.AdamW(
+            clip_gradient_norm=1.0,
+            weight_decay=0.01
+        ),
+        
+        
+        ema_decay=0.99,
+        
+        # ========== 日志和保存 ==========
+        log_interval=20,
+        save_interval=500,
+        keep_period=500,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="pi0_calvin_scratch_validation",
+        model=pi0_config.Pi0Config(action_dim=7, action_horizon=10, max_token_len=180),
+        
+        data=LeRobotCALVINDataConfig(
+            repo_id="Coil1987121/calvin_lerobot_task_ABCD_D_validation",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("actions",),
+                
+            ),
+            # ✅ 资源配置
+            assets=AssetsConfig(
+                # 使用相对路径或省略（会自动使用 ./assets/pi0_calvin_scratch）
+                # assets_dir="./assets/pi0_calvin_scratch",  # 可以省略
+                asset_id="Coil1987121/calvin_lerobot_task_ABCD_D_validation",
+            ),
+        ),
+        
+        # ========== 验证配置 ==========
+        val_repo_id="Coil1987121/calvin_lerobot_task_ABCD_D_validation",
+        val_freq=200,           # ✅ 改：每 200 步验证
+        val_batch_size=32,      # ✅ 改：与训练批次接近
+        val_num_batches=20,     # ✅ 改：减少验证批次
+        
+        # ========== 训练超参数 ==========
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        num_train_steps=10_000,
+        batch_size=32,          # ✅ 如果 GPU 内存够用，保持 64
+        
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,  # ✅ 改：5% 的训练步数
+            peak_lr=1e-4,
+            decay_steps=10_000,  # ✅ 改：必须与 num_train_steps 匹配
+            decay_lr=1e-6,
+        ),
+        
+        optimizer=_optimizer.AdamW(
+            clip_gradient_norm=1.0,
+            weight_decay=0.01
+        ),
+        
+        
+        ema_decay=0.99,
+        
+        # ========== 日志和保存 ==========
+        log_interval=20,
+        save_interval=500,
+        keep_period=500,
+        wandb_enabled=True,
+    ),
 
 
     #

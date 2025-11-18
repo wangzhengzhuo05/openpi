@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+"""
+创建 CALVIN 数据集子集 - 使用 HuggingFace 缓存目录
+
+数据将保存在 HuggingFace 的标准缓存目录中：
+~/.cache/huggingface/lerobot/
+
+目录结构：
+~/.cache/huggingface/lerobot/
+├── Coil1987121/calvin_lerobot_task_ABCD_D_training/        # 完整训练集
+├── Coil1987121/calvin_lerobot_task_ABCD_D_validation/      # 完整验证集
+├── Coil1987121/calvin_5percent_seed42_training/            # 5% 训练集
+├── Coil1987121/calvin_5percent_seed42_validation/          # 5% 验证集
+└── ...
+
+使用方法：
+    # 创建 5% 子集（训练+验证）
+    python create_subset_hf_cache.py --create_both
+
+    # 创建 10% 子集
+    python create_subset_hf_cache.py --fraction 0.1 --create_both
+
+    # 自定义子集名称
+    python create_subset_hf_cache.py \\
+        --fraction 0.05 \\
+        --subset_suffix my_custom_subset \\
+        --create_both
+
+在训练配置中使用：
+    repo_id="Coil1987121/calvin_5percent_seed42_training"
+"""
+
+import argparse
+import random
+import json
+from pathlib import Path
+from datasets import Dataset
+import numpy as np
+
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    # 简单的进度显示替代
+    def tqdm(iterable, **kwargs):
+        return iterable
+
+
+# 使用 lerobot 的标准缓存目录
+try:
+    from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
+    DEFAULT_CACHE_DIR = HF_LEROBOT_HOME
+    HAS_LEROBOT = True
+except ImportError:
+    # 如果没有安装 lerobot，使用 HuggingFace 的默认缓存
+    from huggingface_hub import constants
+    DEFAULT_CACHE_DIR = Path(constants.HF_HOME) / "lerobot"
+    HAS_LEROBOT = False
+    print("⚠️  警告: 未找到 lerobot 库，某些功能可能不可用")
+
+print(f"📁 使用缓存目录: {DEFAULT_CACHE_DIR}")
+
+
+def create_subset_repo_id(
+    base_repo_id: str,
+    fraction: float,
+    seed: int,
+    split: str,
+    suffix: str = None
+) -> str:
+    """
+    生成子数据集的 repo_id
+    
+    例如：
+    base: "Coil1987121/calvin_lerobot_task_ABCD_D_training"
+    输出: "Coil1987121/calvin_5percent_seed42_training"
+    """
+    # 解析 base_repo_id
+    if "/" in base_repo_id:
+        namespace, dataset_name = base_repo_id.split("/", 1)
+    else:
+        namespace = ""
+        dataset_name = base_repo_id
+    
+    # 移除 split 后缀（如果存在）
+    for s in ["_training", "_train", "_validation", "_val"]:
+        if dataset_name.endswith(s):
+            dataset_name = dataset_name[:-len(s)]
+            break
+    
+    # 生成新名称
+    if suffix:
+        subset_name = f"{dataset_name}_{suffix}"
+    else:
+        fraction_str = str(int(fraction * 100)) + "percent"
+        subset_name = f"{dataset_name}_{fraction_str}_seed{seed}"
+    
+    # 添加 split 后缀
+    if split == "train":
+        subset_name += "_training"
+    elif split == "validation":
+        subset_name += "_validation"
+    
+    if namespace:
+        return f"{namespace}/{subset_name}"
+    return subset_name
+
+
+def get_cache_path(repo_id: str) -> Path:
+    """获取数据集在缓存中的路径"""
+    return DEFAULT_CACHE_DIR / repo_id
+
+
+def dataset_exists_in_cache(repo_id: str) -> bool:
+    """检查数据集是否已存在于缓存中"""
+    cache_path = get_cache_path(repo_id)
+    return cache_path.exists() and (cache_path / "data").exists()
+
+
+def get_cached_dataset_info(repo_id: str) -> dict:
+    """获取缓存中数据集的信息"""
+    cache_path = get_cache_path(repo_id)
+    
+    if not dataset_exists_in_cache(repo_id):
+        return None
+    
+    info = {
+        "cache_path": str(cache_path),
+        "exists": True,
+    }
+    
+    # 尝试使用 LeRobotDataset 读取信息（最准确）
+    if HAS_LEROBOT:
+        try:
+            import os
+            old_hf_hub_offline = os.environ.get('HF_HUB_OFFLINE')
+            os.environ['HF_HUB_OFFLINE'] = '1'
+            
+            try:
+                dataset = LeRobotDataset(repo_id, root=DEFAULT_CACHE_DIR, local_files_only=True)
+                info['total_episodes'] = dataset.num_episodes
+                info['total_frames'] = len(dataset)
+                info['fps'] = dataset.fps
+                info['robot_type'] = dataset.robot_type
+                return info
+            finally:
+                if old_hf_hub_offline is None:
+                    os.environ.pop('HF_HUB_OFFLINE', None)
+                else:
+                    os.environ['HF_HUB_OFFLINE'] = old_hf_hub_offline
+        except Exception:
+            pass
+    
+    # 尝试读取元数据文件
+    metadata_path = cache_path / "meta" / "info.json"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, 'r') as f:
+                meta = json.load(f)
+                info.update(meta)
+        except Exception:
+            pass
+    
+    return info
+
+
+def create_subset(
+    source_repo_id: str,
+    target_repo_id: str,
+    fraction: float = 0.05,
+    seed: int = 42,
+    split: str = "train",
+):
+    """
+    创建数据集子集并保存到 HuggingFace 缓存
+    
+    Args:
+        source_repo_id: 源数据集的 repo ID
+        target_repo_id: 目标子集的 repo ID
+        fraction: 采样比例
+        seed: 随机种子
+        split: 数据集分割
+    """
+    
+    print("=" * 70)
+    print(f"🚀 创建数据集子集")
+    print("=" * 70)
+    print(f"\n📋 配置:")
+    print(f"   源数据集: {source_repo_id}")
+    print(f"   目标子集: {target_repo_id}")
+    print(f"   分割: {split}")
+    print(f"   采样比例: {fraction * 100:.1f}%")
+    print(f"   随机种子: {seed}")
+    
+    target_cache_path = get_cache_path(target_repo_id)
+    print(f"   缓存路径: {target_cache_path}")
+    
+    # 检查是否已存在
+    if dataset_exists_in_cache(target_repo_id):
+        print(f"\n⚠️  目标数据集已存在于缓存中")
+        info = get_cached_dataset_info(target_repo_id)
+        if info:
+            print(f"   Episodes: {info.get('total_episodes', 'unknown')}")
+            print(f"   Frames: {info.get('total_frames', 'unknown')}")
+        
+        response = input("   是否覆盖? [y/N]: ").strip().lower()
+        if response != 'y':
+            print("   取消操作")
+            return None
+        
+        print(f"   删除已存在的数据集...")
+        import shutil
+        shutil.rmtree(target_cache_path)
+    
+    # 1. 加载源数据集
+    print(f"\n📥 步骤 1/4: 加载源数据集...")
+    print(f"   {source_repo_id}")
+    
+    if not HAS_LEROBOT:
+        print(f"   ❌ 需要安装 lerobot 库才能加载数据集")
+        print(f"   pip install lerobot")
+        return None
+    
+    try:
+        # 使用 LeRobotDataset 加载
+        source_cache_path = get_cache_path(source_repo_id)
+        
+        if not source_cache_path.exists():
+            print(f"   ❌ 源数据集不存在: {source_cache_path}")
+            print(f"\n💡 提示:")
+            print(f"   1. 确保已转换数据集到 LeRobot 格式")
+            print(f"   2. 运行 'uv run create_subset.py --list' 查看可用数据集")
+            print(f"   3. 数据集路径应该是: {DEFAULT_CACHE_DIR}/{source_repo_id}")
+            return None
+        
+        print(f"   从缓存加载: {source_cache_path}")
+        print(f"   ⏳ 加载中...", end=" ", flush=True)
+        
+        # 设置离线模式，避免访问 HuggingFace Hub
+        import os
+        old_hf_hub_offline = os.environ.get('HF_HUB_OFFLINE')
+        os.environ['HF_HUB_OFFLINE'] = '1'
+        
+        try:
+            # 使用 local_files_only 参数强制离线模式
+            # root 应该是 repo_id 的父目录
+            lerobot_dataset = LeRobotDataset(
+                source_repo_id,
+                root=DEFAULT_CACHE_DIR,
+                local_files_only=True,
+            )
+        finally:
+            # 恢复原来的环境变量
+            if old_hf_hub_offline is None:
+                os.environ.pop('HF_HUB_OFFLINE', None)
+            else:
+                os.environ['HF_HUB_OFFLINE'] = old_hf_hub_offline
+        
+        print(f"✅")
+        print(f"   📊 数据集信息:")
+        print(f"      Episodes: {lerobot_dataset.num_episodes}")
+        print(f"      Frames: {len(lerobot_dataset)}")
+        print(f"      FPS: {lerobot_dataset.fps}")
+        print(f"      Robot: {lerobot_dataset.robot_type}")
+        
+        # 转换为 HuggingFace Dataset 格式以便处理
+        print(f"   📦 准备数据...", end=" ", flush=True)
+        dataset = lerobot_dataset.hf_dataset
+        print(f"✅")
+        
+    except Exception as e:
+        print(f"\n   ❌ 加载失败: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"\n💡 提示:")
+        print(f"   1. 确保数据集已经转换为 LeRobot 格式")
+        print(f"   2. 检查数据集路径: {get_cache_path(source_repo_id)}")
+        print(f"   3. 检查 meta/info.json 文件是否存在")
+        print(f"   4. 如果是网络问题，脚本已尝试使用离线模式")
+        return None
+    
+    # 2. 采样 episodes
+    print(f"\n📊 步骤 2/4: 采样 episodes...")
+    
+    all_episodes = sorted(set(dataset['episode_index']))
+    total_episodes = len(all_episodes)
+    num_sampled = max(1, int(total_episodes * fraction))
+    
+    print(f"   总 episodes: {total_episodes}")
+    print(f"   采样数量: {num_sampled} ({fraction*100:.1f}%)")
+    print(f"   随机种子: {seed}")
+    
+    random.seed(seed)
+    sampled_episodes = set(random.sample(all_episodes, num_sampled))
+    
+    print(f"   采样的 episodes (前10个): {sorted(list(sampled_episodes))[:10]}")
+    
+    # 3. 过滤数据集
+    print(f"\n🔍 步骤 3/4: 过滤和重组数据集...")
+    
+    original_size = len(dataset)
+    print(f"   原始样本数: {original_size}")
+    print(f"   ⏳ 过滤中...", end=" ", flush=True)
+    
+    # 按 episode 过滤
+    sampled_dataset = dataset.filter(
+        lambda x: x['episode_index'] in sampled_episodes,
+        desc="过滤 episodes"
+    )
+    new_size = len(sampled_dataset)
+    actual_fraction = new_size / original_size if original_size > 0 else 0
+    
+    print(f"✅")
+    print(f"   采样样本数: {new_size}")
+    print(f"   实际比例: {actual_fraction * 100:.2f}%")
+    
+    # 4. 保存为新的 LeRobot 数据集
+    print(f"\n💾 步骤 4/4: 保存为 LeRobot 数据集...")
+    print(f"   目标路径: {target_cache_path}")
+    
+    try:
+        # 删除已存在的目标路径（如果有）
+        if target_cache_path.exists():
+            import shutil
+            shutil.rmtree(target_cache_path)
+        
+        target_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 获取源数据集的 features 和元数据
+        source_info = lerobot_dataset.info
+        
+        print(f"   📋 数据集配置:")
+        print(f"      Robot: {source_info.get('robot_type', 'unknown')}")
+        print(f"      FPS: {source_info.get('fps', 30)}")
+        
+        print(f"   ⏳ 创建新数据集...", end=" ", flush=True)
+        
+        # 设置离线模式
+        import os
+        old_hf_hub_offline = os.environ.get('HF_HUB_OFFLINE')
+        os.environ['HF_HUB_OFFLINE'] = '1'
+        
+        try:
+            # 创建新的 LeRobot 数据集
+            new_dataset = LeRobotDataset.create(
+                repo_id=target_repo_id,
+                fps=source_info.get('fps', 30),
+                robot_type=source_info.get('robot_type', 'franka'),
+                features=lerobot_dataset.features,
+                image_writer_threads=4,
+                image_writer_processes=2,
+                local_files_only=True,
+            )
+        finally:
+            # 恢复环境变量
+            if old_hf_hub_offline is None:
+                os.environ.pop('HF_HUB_OFFLINE', None)
+            else:
+                os.environ['HF_HUB_OFFLINE'] = old_hf_hub_offline
+        
+        print(f"✅")
+        print(f"   📦 添加数据 (共 {num_sampled} episodes)...")
+        
+        # 按 episode 组织数据
+        episode_data = {}
+        for idx in range(len(sampled_dataset)):
+            sample = sampled_dataset[idx]
+            ep_idx = sample['episode_index']
+            
+            if ep_idx not in episode_data:
+                episode_data[ep_idx] = []
+            
+            episode_data[ep_idx].append(sample)
+        
+        # 逐 episode 添加（显示进度）
+        for ep_idx, frames in tqdm(
+            sorted(episode_data.items()), 
+            desc="   保存 episodes",
+            unit="ep",
+            disable=not HAS_TQDM
+        ):
+            for frame in frames:
+                # 准备帧数据
+                frame_dict = {}
+                for key in frame.keys():
+                    if key not in ['index', 'episode_index', 'frame_index', 'timestamp']:
+                        frame_dict[key] = frame[key]
+                
+                new_dataset.add_frame(frame_dict)
+            
+            new_dataset.save_episode()
+        
+        print(f"\n   ✅ 保存成功")
+        print(f"   📊 新数据集统计:")
+        print(f"      Episodes: {new_dataset.num_episodes}")
+        print(f"      Frames: {len(new_dataset)}")
+        
+    except Exception as e:
+        print(f"\n   ❌ 保存失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    
+    # 5. 创建元数据
+    metadata = {
+        'source_repo_id': source_repo_id,
+        'target_repo_id': target_repo_id,
+        'split': split,
+        'fraction': fraction,
+        'seed': seed,
+        'total_episodes': len(sampled_episodes),
+        'total_frames': len(new_dataset),
+        'original_episodes': total_episodes,
+        'original_frames': original_size,
+        'actual_fraction': actual_fraction,
+        'sampled_episode_ids': sorted(list(sampled_episodes)),
+    }
+    
+    metadata_path = target_cache_path / "subset_metadata.json"
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    print(f"\n📝 元数据已保存: {metadata_path}")
+    
+    # 总结
+    print("\n" + "=" * 70)
+    print("✅ 子数据集创建完成！")
+    print("=" * 70)
+    print(f"\n📊 统计:")
+    print(f"   Episodes: {len(sampled_episodes)} / {total_episodes} ({actual_fraction*100:.2f}%)")
+    print(f"   Frames: {len(new_dataset)} / {original_size}")
+    print(f"\n📁 位置:")
+    print(f"   {target_cache_path}")
+    print(f"\n💡 在训练配置中使用:")
+    print(f"   repo_id=\"{target_repo_id}\"")
+    
+    return str(target_cache_path)
+
+
+def list_cached_datasets():
+    """列出缓存中的所有数据集"""
+    print("\n📂 HuggingFace 缓存中的数据集:")
+    print("=" * 70)
+    
+    if not DEFAULT_CACHE_DIR.exists():
+        print(f"缓存目录不存在: {DEFAULT_CACHE_DIR}")
+        print("\n💡 提示: 请先转换数据集到 LeRobot 格式")
+        return
+    
+    print(f"📁 扫描目录: {DEFAULT_CACHE_DIR}")
+    
+    # 查找所有数据集
+    datasets = []
+    
+    # 扫描缓存目录
+    try:
+        namespace_dirs = [d for d in DEFAULT_CACHE_DIR.iterdir() if d.is_dir()]
+        print(f"📂 找到 {len(namespace_dirs)} 个命名空间目录")
+        
+        for namespace_dir in namespace_dirs:
+            print(f"\n🔍 扫描命名空间: {namespace_dir.name}")
+            
+            try:
+                dataset_dirs = [d for d in namespace_dir.iterdir() if d.is_dir()]
+                print(f"   找到 {len(dataset_dirs)} 个目录")
+                
+                for dataset_dir in dataset_dirs:
+                    print(f"   🔍 检查: {dataset_dir.name}", end=" ... ")
+                    
+                    # 检查是否是 LeRobot 数据集（有 data 和 meta 目录）
+                    has_data = (dataset_dir / "data").exists()
+                    has_meta = (dataset_dir / "meta").exists()
+                    
+                    if has_data and has_meta:
+                        print("✅")
+                        repo_id = f"{namespace_dir.name}/{dataset_dir.name}"
+                        
+                        # 尝试获取信息
+                        print(f"      📊 加载信息...", end=" ")
+                        try:
+                            info = get_cached_dataset_info(repo_id)
+                            if info:
+                                print("✅")
+                                datasets.append({
+                                    'repo_id': repo_id,
+                                    'episodes': info.get('total_episodes', '?'),
+                                    'frames': info.get('total_frames', '?'),
+                                    'fps': info.get('fps', '?'),
+                                    'robot': info.get('robot_type', '?'),
+                                    'path': str(dataset_dir)
+                                })
+                            else:
+                                print("⚠️  (无法读取信息)")
+                        except Exception as e:
+                            print(f"❌ ({e})")
+                    else:
+                        print(f"⏭️  (不是 LeRobot 数据集: data={has_data}, meta={has_meta})")
+                        
+            except Exception as e:
+                print(f"   ❌ 扫描失败: {e}")
+                
+    except Exception as e:
+        print(f"❌ 扫描失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    print("\n" + "=" * 70)
+    
+    if not datasets:
+        print("❌ 没有找到有效的数据集")
+        print("\n💡 提示:")
+        print("   1. 确保已运行数据转换脚本")
+        print("   2. 检查数据集目录结构（需要 data/ 和 meta/ 子目录）")
+        print(f"   3. 当前缓存目录: {DEFAULT_CACHE_DIR}")
+        return
+    
+    print(f"✅ 找到 {len(datasets)} 个数据集:\n")
+    
+    # 按名称排序
+    datasets.sort(key=lambda x: x['repo_id'])
+    
+    # 打印
+    for ds in datasets:
+        print(f"📦 {ds['repo_id']}")
+        print(f"   Episodes: {ds['episodes']}")
+        print(f"   Frames: {ds['frames']}")
+        print(f"   FPS: {ds['fps']}")
+        print(f"   Robot: {ds['robot']}")
+        print(f"   Path: {ds['path']}")
+        print()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="创建数据集子集并保存到 HuggingFace 缓存",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    
+    parser.add_argument(
+        "--source_train_repo_id",
+        type=str,
+        default="Coil1987121/calvin_lerobot_task_ABCD_D_training",
+        help="源训练集的 repo ID"
+    )
+    
+    parser.add_argument(
+        "--source_val_repo_id",
+        type=str,
+        default="Coil1987121/calvin_lerobot_task_ABCD_D_validation",
+        help="源验证集的 repo ID"
+    )
+    
+    parser.add_argument(
+        "--fraction",
+        type=float,
+        default=0.05,
+        help="采样比例，默认 0.05 (5%%)"
+    )
+    
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子"
+    )
+    
+    parser.add_argument(
+        "--subset_suffix",
+        type=str,
+        default=None,
+        help="子集后缀名（如果不指定，自动生成如 5percent_seed42）"
+    )
+    
+    parser.add_argument(
+        "--create_both",
+        action="store_true",
+        help="同时创建训练集和验证集"
+    )
+    
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        choices=["train", "validation"],
+        help="要创建的分割（如果不使用 --create_both）"
+    )
+    
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="列出缓存中的所有数据集"
+    )
+    
+    args = parser.parse_args()
+    
+    # 列出数据集
+    if args.list:
+        list_cached_datasets()
+        return
+    
+    # 验证参数
+    if not 0 < args.fraction <= 1.0:
+        print(f"❌ 错误: fraction 必须在 (0, 1] 范围内")
+        return
+    
+    created_repos = []
+    
+    # 创建训练集
+    if args.create_both or args.split == "train":
+        print("\n🔵 创建训练集子集...")
+        
+        target_train_repo_id = create_subset_repo_id(
+            args.source_train_repo_id,
+            args.fraction,
+            args.seed,
+            "train",
+            args.subset_suffix
+        )
+        
+        train_path = create_subset(
+            source_repo_id=args.source_train_repo_id,
+            target_repo_id=target_train_repo_id,
+            fraction=args.fraction,
+            seed=args.seed,
+            split="train"
+        )
+        
+        if train_path:
+            created_repos.append(("训练集", target_train_repo_id))
+        print()
+    
+    # 创建验证集
+    if args.create_both or args.split == "validation":
+        print("\n🟢 创建验证集子集...")
+        
+        target_val_repo_id = create_subset_repo_id(
+            args.source_val_repo_id,
+            args.fraction,
+            args.seed,
+            "validation",
+            args.subset_suffix
+        )
+        
+        val_path = create_subset(
+            source_repo_id=args.source_val_repo_id,
+            target_repo_id=target_val_repo_id,
+            fraction=args.fraction,
+            seed=args.seed,
+            split="validation"
+        )
+        
+        if val_path:
+            created_repos.append(("验证集", target_val_repo_id))
+        print()
+    
+    # 最终总结
+    if created_repos:
+        print("\n" + "=" * 70)
+        print("🎉 所有子数据集创建完成！")
+        print("=" * 70)
+        
+        print("\n📦 创建的数据集:")
+        for name, repo_id in created_repos:
+            cache_path = get_cache_path(repo_id)
+            print(f"\n{name}:")
+            print(f"  Repo ID: {repo_id}")
+            print(f"  路径: {cache_path}")
+        
+        print("\n📝 在训练配置中使用:")
+        print("```python")
+        if len(created_repos) >= 1:
+            train_repo = created_repos[0][1]
+            print(f"data=LeRobotCALVINDataConfig(")
+            print(f"    repo_id=\"{train_repo}\",")
+            print(f"    # ... 其他配置")
+            print(f"),")
+        if len(created_repos) >= 2:
+            val_repo = created_repos[1][1]
+            print(f"val_repo_id=\"{val_repo}\",")
+        print("```")
+        
+        print("\n💡 提示:")
+        print(f"  - 所有数据集都保存在: {DEFAULT_CACHE_DIR}")
+        print(f"  - 使用 --list 查看缓存中的所有数据集")
+        print(f"  - 数据集会自动被 LeRobotDataset 识别")
+    
+    print()
+
+
+if __name__ == "__main__":
+    main()

@@ -11,7 +11,7 @@ class CALVINInputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
         # 1) 读取顶层字段（与 RepackTransform 输出一致）
         in_images = data["images"]          # dict: base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb
-        state = np.asarray(data["state"], dtype=np.float32)[[6, 7, 8, 9, 10, 11, 12]]   # 1D
+        state = np.asarray(data["state"], dtype=np.float32)[0:7]   # 1D
         actions = data.get("actions")       # [T, 7] or None
         prompt = data.get("prompt")
 
