@@ -1,13 +1,12 @@
 """
 Pi0 CALVIN 模型评估脚本 - 最终版 v2
 支持语言指令加载
-
-uv run /path/to/evaluate_pi0_calvin.py \
+支持统计异常
+uv run evaluate_pi0_calvin.py \
     --checkpoint_dir /root/autodl-tmp/openpi/checkpoints/pi0_calvin_scratch/calvin_full/21000 \
     --dataset_path /root/autodl-tmp/huggingface/lerobot/Coil1987121/calvin_lerobot_task_ABCD_D_validation \
     --config_name pi0_calvin_scratch \
-    --num_samples 100 \
-    --action_horizon 10
+    --num_samples 100
 """
 
 import sys
@@ -29,52 +28,164 @@ sys.path.insert(0, OPENPI_ROOT)
 
 
 # ============================================================================
+# 异常数据统计
+# ============================================================================
+
+class AnomalyStats:
+    """统计异常数据"""
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        # 图像相关
+        self.base_image_failed = 0
+        self.left_wrist_failed = 0
+        self.right_wrist_failed = 0
+        self.total_images_processed = 0
+        
+        # Prompt 相关
+        self.prompt_not_found = 0
+        self.prompt_default_used = 0
+        self.total_prompts_processed = 0
+        
+        # 状态相关
+        self.state_failed = 0
+        self.total_states_processed = 0
+        
+        # Action 相关
+        self.action_failed = 0
+        self.total_actions_processed = 0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "images": {
+                "base_image_failed": self.base_image_failed,
+                "left_wrist_failed": self.left_wrist_failed,
+                "right_wrist_failed": self.right_wrist_failed,
+                "total_processed": self.total_images_processed,
+                "failure_rate": (self.base_image_failed + self.left_wrist_failed + self.right_wrist_failed) / max(self.total_images_processed, 1),
+            },
+            "prompts": {
+                "not_found": self.prompt_not_found,
+                "default_used": self.prompt_default_used,
+                "total_processed": self.total_prompts_processed,
+                "failure_rate": self.prompt_not_found / max(self.total_prompts_processed, 1),
+            },
+            "states": {
+                "failed": self.state_failed,
+                "total_processed": self.total_states_processed,
+                "failure_rate": self.state_failed / max(self.total_states_processed, 1),
+            },
+            "actions": {
+                "failed": self.action_failed,
+                "total_processed": self.total_actions_processed,
+                "failure_rate": self.action_failed / max(self.total_actions_processed, 1),
+            },
+        }
+    
+    def print_summary(self):
+        print("\n" + "=" * 50)
+        print(" 异常数据统计")
+        print("=" * 50)
+        
+        total_img_failed = self.base_image_failed + self.left_wrist_failed + self.right_wrist_failed
+        print(f"\n🖼️  图像异常:")
+        print(f"  base_image 加载失败: {self.base_image_failed}")
+        print(f"  left_wrist 加载失败: {self.left_wrist_failed}")
+        print(f"  right_wrist 加载失败: {self.right_wrist_failed}")
+        print(f"  总处理数: {self.total_images_processed}")
+        if self.total_images_processed > 0:
+            print(f"  失败率: {total_img_failed / self.total_images_processed * 100:.2f}%")
+        
+        print(f"\n📝 Prompt 异常:")
+        print(f"  task_index 未找到: {self.prompt_not_found}")
+        print(f"  使用默认 prompt: {self.prompt_default_used}")
+        print(f"  总处理数: {self.total_prompts_processed}")
+        if self.total_prompts_processed > 0:
+            print(f"  失败率: {self.prompt_not_found / self.total_prompts_processed * 100:.2f}%")
+        
+        print(f"\n🤖 State 异常:")
+        print(f"  解析失败: {self.state_failed}")
+        print(f"  总处理数: {self.total_states_processed}")
+        if self.total_states_processed > 0:
+            print(f"  失败率: {self.state_failed / self.total_states_processed * 100:.2f}%")
+        
+        print(f"\n🎯 Action 异常:")
+        print(f"  解析失败: {self.action_failed}")
+        print(f"  总处理数: {self.total_actions_processed}")
+        if self.total_actions_processed > 0:
+            print(f"  失败率: {self.action_failed / self.total_actions_processed * 100:.2f}%")
+
+
+# 全局异常统计对象
+anomaly_stats = AnomalyStats()
+
+
+# ============================================================================
 # 图像解析
 # ============================================================================
 
-def parse_image(image: Any, dataset_path: Path = None) -> np.ndarray:
-    """解析图像为 (H, W, C) uint8 格式"""
+def parse_image(image: Any, dataset_path: Path = None, image_type: str = "unknown") -> Tuple[np.ndarray, bool]:
+    """
+    解析图像为 (H, W, C) uint8 格式
+    
+    Returns:
+        image: 解析后的图像
+        success: 是否成功解析（False 表示使用了零填充）
+    """
     from PIL import Image
     
     if image is None:
-        return np.zeros((224, 224, 3), dtype=np.uint8)
+        return np.zeros((224, 224, 3), dtype=np.uint8), False
     
     # LeRobot 字典格式 {'bytes': b'...', 'path': '...'}
     if isinstance(image, dict):
         if 'bytes' in image and image['bytes'] is not None:
             try:
                 pil_img = Image.open(io.BytesIO(image['bytes']))
-                return np.array(pil_img.convert('RGB'), dtype=np.uint8)
+                return np.array(pil_img.convert('RGB'), dtype=np.uint8), True
             except:
                 pass
-        return np.zeros((224, 224, 3), dtype=np.uint8)
+        return np.zeros((224, 224, 3), dtype=np.uint8), False
     
     # bytes 数据
     if isinstance(image, (bytes, bytearray)):
         try:
             pil_img = Image.open(io.BytesIO(image))
-            return np.array(pil_img.convert('RGB'), dtype=np.uint8)
+            return np.array(pil_img.convert('RGB'), dtype=np.uint8), True
         except:
-            return np.zeros((224, 224, 3), dtype=np.uint8)
+            return np.zeros((224, 224, 3), dtype=np.uint8), False
     
     # numpy array
-    image = np.asarray(image)
-    if image.ndim == 3 and image.shape[0] in [1, 3, 4]:
-        image = np.transpose(image, (1, 2, 0))
-    if np.issubdtype(image.dtype, np.floating):
-        image = (image * 255).clip(0, 255).astype(np.uint8)
-    return image.astype(np.uint8)
+    try:
+        image = np.asarray(image)
+        if image.ndim == 3 and image.shape[0] in [1, 3, 4]:
+            image = np.transpose(image, (1, 2, 0))
+        if np.issubdtype(image.dtype, np.floating):
+            image = (image * 255).clip(0, 255).astype(np.uint8)
+        return image.astype(np.uint8), True
+    except:
+        return np.zeros((224, 224, 3), dtype=np.uint8), False
 
 
-def parse_array(data: Any, expected_dim: int = 7) -> np.ndarray:
-    """解析数组"""
+def parse_array(data: Any, expected_dim: int = 7) -> Tuple[np.ndarray, bool]:
+    """
+    解析数组
+    
+    Returns:
+        array: 解析后的数组
+        success: 是否成功解析
+    """
     if data is None:
-        return np.zeros(expected_dim, dtype=np.float32)
-    if isinstance(data, (list, tuple)):
-        return np.array(data, dtype=np.float32).flatten()
-    if isinstance(data, np.ndarray):
-        return data.astype(np.float32).flatten()
-    return np.zeros(expected_dim, dtype=np.float32)
+        return np.zeros(expected_dim, dtype=np.float32), False
+    try:
+        if isinstance(data, (list, tuple)):
+            return np.array(data, dtype=np.float32).flatten(), True
+        if isinstance(data, np.ndarray):
+            return data.astype(np.float32).flatten(), True
+    except:
+        pass
+    return np.zeros(expected_dim, dtype=np.float32), False
 
 
 # ============================================================================
@@ -148,50 +259,109 @@ def compute_rotation_error_np(q_pred, q_gt):
 
 
 def evaluate_trajectory_np(pred_traj, gt_traj):
-    """评估轨迹质量"""
+    """评估轨迹质量（终点误差 + 多档成功率 + 部分全局统计）
+
+    输入:
+        pred_traj: [B, T, D] 预测轨迹
+        gt_traj:   [B, T, D] GT 轨迹
+        约定前3维为位置 xyz，后4维为四元数 qx, qy, qz, qw
+
+    输出:
+        metrics: dict，兼容原版 key，同时加入与
+                 evaluate_trajectory_quality 等价的统计
+    """
     metrics = {}
-    
-    # 基础误差
+
+    # -------- 0. 安全检查 --------
+    pred_traj = np.asarray(pred_traj)
+    gt_traj = np.asarray(gt_traj)
+    assert pred_traj.shape == gt_traj.shape, \
+        f"pred_traj shape {pred_traj.shape} != gt_traj shape {gt_traj.shape}"
+
+    B, T, D = pred_traj.shape
+
+    # ========== 1. 终点位置 / 旋转误差（核心逻辑，对齐后一份代码） ==========
+
+    # 终点位置 [B, 3]
+    pred_pos_final = pred_traj[:, -1, :3]
+    gt_pos_final   = gt_traj[:, -1, :3]
+    # 终点位置误差 (米)
+    pos_errors = np.linalg.norm(pred_pos_final - gt_pos_final, axis=-1)  # [B]
+
+    # 终点旋转 [B, 4]
+    if D >= 7:
+        pred_rot_final = pred_traj[:, -1, 3:7]
+        gt_rot_final   = gt_traj[:, -1, 3:7]
+        # 用你原来那份的 numpy 版本旋转误差
+        rot_errors = compute_rotation_error_np(pred_rot_final, gt_rot_final)  # [B]，单位: 度
+        
+        metrics['rot_error_mean_deg']   = float(rot_errors.mean())
+        metrics['rot_error_median_deg'] = float(np.median(rot_errors))
+        metrics['rot_error_std_deg']    = float(np.std(rot_errors))
+        metrics["Mean_Rot_Error_deg"]  = float(rot_errors.mean())
+
+    else:
+        # 没有旋转维度时，旋转误差全 0，避免崩
+        rot_errors = np.zeros(B, dtype=np.float32)
+
+    # ---- 对齐 evaluate_trajectory_quality 的核心指标 ----
+    metrics["Mean_Pos_Error_cm"]   = float(pos_errors.mean() * 100.0)
+    metrics["Mean_Rot_Error_deg"]  = float(rot_errors.mean())
+
+    # 宽松标准 (5cm, 10°)
+    sr_loose = np.mean((pos_errors < 0.05) & (rot_errors < 10.0))
+    # 严格标准 (2cm, 5°)
+    sr_strict = np.mean((pos_errors < 0.02) & (rot_errors < 5.0))
+    # 高精度 (1cm, 2°)
+    sr_highprec = np.mean((pos_errors < 0.01) & (rot_errors < 2.0))
+
+    metrics["SR_Loose"]    = float(sr_loose)
+    metrics["SR_Strict"]   = float(sr_strict)
+    metrics["SR_HighPrec"] = float(sr_highprec)
+
+    # 同时兼容你原来用的命名（方便老脚本不炸）
+    metrics["sr_5cm_10deg"] = float(sr_loose)
+    metrics["sr_2cm_5deg"]  = float(sr_strict)
+    metrics["sr_1cm_2deg"]  = float(sr_highprec)
+
+    # ========== 2. 保留部分全轨迹/位置统计（原函数有的） ==========
+
+    # 全轨迹基础误差（按你原来的定义）
     metrics['traj_mse'] = float(np.mean((pred_traj - gt_traj) ** 2))
     metrics['traj_mae'] = float(np.mean(np.abs(pred_traj - gt_traj)))
     metrics['traj_rmse'] = float(np.sqrt(metrics['traj_mse']))
-    
-    # 位置误差
-    pos_pred, pos_gt = pred_traj[:, :, :3], gt_traj[:, :, :3]
-    metrics['pos_mse'] = float(np.mean((pos_pred - pos_gt) ** 2))
-    metrics['pos_rmse_cm'] = float(np.sqrt(metrics['pos_mse']) * 100)
-    
-    # FDE / ADE
-    fde = np.linalg.norm(pos_pred[:, -1] - pos_gt[:, -1], axis=-1)
-    metrics['fde_mean_cm'] = float(np.mean(fde) * 100)
-    metrics['fde_median_cm'] = float(np.median(fde) * 100)
-    metrics['fde_std_cm'] = float(np.std(fde) * 100)
-    
-    ade = np.mean(np.linalg.norm(pos_pred - pos_gt, axis=-1), axis=1)
-    metrics['ade_mean_cm'] = float(np.mean(ade) * 100)
-    metrics['ade_median_cm'] = float(np.median(ade) * 100)
-    
-    # 旋转误差
-    if pred_traj.shape[-1] >= 7:
-        rot_err = compute_rotation_error_np(pred_traj[:, -1, 3:7], gt_traj[:, -1, 3:7])
-        metrics['rot_error_mean_deg'] = float(np.mean(rot_err))
-        metrics['rot_error_median_deg'] = float(np.median(rot_err))
-        metrics['rot_error_std_deg'] = float(np.std(rot_err))
+
+    # 位置误差（全轨迹上）
+    pos_pred_all, pos_gt_all = pred_traj[:, :, :3], gt_traj[:, :, :3]
+    metrics['pos_mse'] = float(np.mean((pos_pred_all - pos_gt_all) ** 2))
+    metrics['pos_rmse_cm'] = float(np.sqrt(metrics['pos_mse']) * 100.0)
+
+    # FDE / ADE（与后一份效果一致：FDE/ADE 用终点/全轨迹距离）
+    fde = pos_errors  # 终点误差本身就是 FDE（单位：米）
+    metrics['fde_mean_cm']    = float(np.mean(fde) * 100.0)
+    metrics['fde_median_cm']  = float(np.median(fde) * 100.0)
+    metrics['fde_std_cm']     = float(np.std(fde) * 100.0)
+
+    ade = np.mean(
+        np.linalg.norm(pos_pred_all - pos_gt_all, axis=-1), axis=1
+    )  # [B]，全轨迹平均距离
+    metrics['ade_mean_cm']    = float(np.mean(ade) * 100.0)
+    metrics['ade_median_cm']  = float(np.median(ade) * 100.0)
+
+    # ========== 3. 保留旋转 MSE / per-dim MSE（如果有旋转维度） ==========
+
+    if D >= 7:
+        # 全轨迹上 3:7 维的 MSE
         metrics['rot_mse'] = float(np.mean((pred_traj[:, :, 3:7] - gt_traj[:, :, 3:7]) ** 2))
-        
-        # 成功率
-        metrics['sr_1cm_2deg'] = float(np.mean((fde < 0.01) & (rot_err < 2.0)))
-        metrics['sr_2cm_5deg'] = float(np.mean((fde < 0.02) & (rot_err < 5.0)))
-        metrics['sr_3cm_10deg'] = float(np.mean((fde < 0.03) & (rot_err < 10.0)))
-        metrics['sr_5cm_15deg'] = float(np.mean((fde < 0.05) & (rot_err < 15.0)))
-    
-    # 每维度 MSE
+
+    # 每维度 MSE（全轨迹 + 全 batch）
     per_dim_mse = np.mean((pred_traj - gt_traj) ** 2, axis=(0, 1))
-    dim_names = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'gripper'][:pred_traj.shape[-1]]
+    dim_names = ['x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'gripper'][:D]
     for i, name in enumerate(dim_names):
         metrics[f'mse_{name}'] = float(per_dim_mse[i])
-    
+
     return metrics
+
 
 
 # ============================================================================
@@ -277,6 +447,8 @@ class CALVINEvalDataset:
             'task_index',
             'task_idx',
         ])
+        if self.action_col is None:
+            raise RuntimeError("数据集中未找到动作列 (actions / action / rel_actions)")
         
         if self.verbose:
             print(f"\n检测到的列:")
@@ -306,57 +478,92 @@ class CALVINEvalDataset:
             })
         return episodes
     
-    def get_task_description(self, task_index: Any) -> str:
+    def get_task_description(self, task_index: Any) -> Tuple[str, bool]:
         """
         根据 task_index 获取任务描述
+        
+        Returns:
+            description: 任务描述
+            success: 是否成功获取（False 表示使用了默认值或未找到）
         """
         if task_index is None:
-            return "perform the task"
+            return "perform the task", False
         
         try:
             idx = int(task_index)
             if idx in self.task_map:
-                return self.task_map[idx]
+                return self.task_map[idx], True
             else:
-                return f"perform task {idx}"
+                return f"perform task {idx}", False
         except (ValueError, TypeError):
-            return "perform the task"
+            return "perform the task", False
     
     def get_sample(self, idx: int) -> Dict[str, Any]:
         """
         获取单个样本，格式化为 CALVIN policy 期望的输入
+        同时统计异常数据
         """
+        global anomaly_stats
         row = self.data.iloc[idx]
         
         # 构建 images 字典
         images = {}
         
+        # Base image
+        anomaly_stats.total_images_processed += 1
         if self.base_image_col:
-            images["base_0_rgb"] = parse_image(row[self.base_image_col], self.dataset_path)
+            img, success = parse_image(row[self.base_image_col], self.dataset_path, "base")
+            images["base_0_rgb"] = img
+            if not success:
+                anomaly_stats.base_image_failed += 1
         else:
             images["base_0_rgb"] = np.zeros((224, 224, 3), dtype=np.uint8)
+            anomaly_stats.base_image_failed += 1
         
+        # Left wrist image
+        anomaly_stats.total_images_processed += 1
         if self.left_wrist_col:
-            images["left_wrist_0_rgb"] = parse_image(row[self.left_wrist_col], self.dataset_path)
+            img, success = parse_image(row[self.left_wrist_col], self.dataset_path, "left_wrist")
+            images["left_wrist_0_rgb"] = img
+            if not success:
+                anomaly_stats.left_wrist_failed += 1
         else:
             images["left_wrist_0_rgb"] = np.zeros((224, 224, 3), dtype=np.uint8)
+            anomaly_stats.left_wrist_failed += 1
         
+        # Right wrist image
+        anomaly_stats.total_images_processed += 1
         if self.right_wrist_col:
-            images["right_wrist_0_rgb"] = parse_image(row[self.right_wrist_col], self.dataset_path)
+            img, success = parse_image(row[self.right_wrist_col], self.dataset_path, "right_wrist")
+            images["right_wrist_0_rgb"] = img
+            if not success:
+                anomaly_stats.right_wrist_failed += 1
         else:
             images["right_wrist_0_rgb"] = np.zeros((224, 224, 3), dtype=np.uint8)
+            anomaly_stats.right_wrist_failed += 1
         
         # 状态
+        anomaly_stats.total_states_processed += 1
         if self.state_col:
-            state = parse_array(row[self.state_col], 32)
+            state, success = parse_array(row[self.state_col], 32)
+            if not success:
+                anomaly_stats.state_failed += 1
         else:
             state = np.zeros(8, dtype=np.float32)
+            anomaly_stats.state_failed += 1
         
         # 任务提示 - 从 task_index 获取语言指令
+        anomaly_stats.total_prompts_processed += 1
         prompt = "perform the task"
+        prompt_success = False
         if self.task_index_col and self.task_index_col in self.data.columns:
             task_idx = row[self.task_index_col]
-            prompt = self.get_task_description(task_idx)
+            prompt, prompt_success = self.get_task_description(task_idx)
+        
+        if not prompt_success:
+            anomaly_stats.prompt_not_found += 1
+        if prompt == "perform the task":
+            anomaly_stats.prompt_default_used += 1
         
         # 构建返回字典
         sample = {
@@ -367,7 +574,11 @@ class CALVINEvalDataset:
         
         # 保存 GT action 用于评估
         if self.action_col:
-            sample["gt_action"] = parse_array(row[self.action_col], 7)
+            action, success = parse_array(row[self.action_col], 7)
+            sample["gt_action"] = action
+            anomaly_stats.total_actions_processed += 1
+            if not success:
+                anomaly_stats.action_failed += 1
         
         # 保存 task_index 用于分析
         if self.task_index_col and self.task_index_col in self.data.columns:
@@ -382,6 +593,7 @@ class CALVINEvalDataset:
         skip_interval: int = 1
     ) -> Tuple[List[Dict], np.ndarray]:
         """获取评估样本"""
+        global anomaly_stats
         samples = []
         gt_trajectories = []
         
@@ -397,7 +609,14 @@ class CALVINEvalDataset:
                 gt_actions = []
                 for i in range(action_horizon):
                     action = self.data.iloc[start_idx + i][self.action_col]
-                    gt_actions.append(parse_array(action, 7))
+                    action_arr, success = parse_array(action, 7)
+                    gt_actions.append(action_arr)
+                    # GT action 统计已经在 get_sample 中处理了第一个
+                    # 这里只统计后续的 action_horizon - 1 个
+                    if i > 0:
+                        anomaly_stats.total_actions_processed += 1
+                        if not success:
+                            anomaly_stats.action_failed += 1
                 
                 samples.append(sample)
                 gt_trajectories.append(np.stack(gt_actions))
@@ -482,9 +701,13 @@ def run_evaluation(
     verbose: bool = True,
 ):
     """运行完整评估"""
+    global anomaly_stats
     
     from openpi.training import config as _config
     from openpi.policies import policy_config as _policy_config
+    
+    # 重置异常统计
+    anomaly_stats.reset()
     
     if verbose:
         print("\n" + "=" * 70)
@@ -552,7 +775,7 @@ def run_evaluation(
                 task_counts[t] = task_counts.get(t, 0) + 1
             print(f"\n任务分布 (前5个):")
             for t, c in sorted(task_counts.items(), key=lambda x: -x[1])[:5]:
-                desc = dataset.get_task_description(t)
+                desc, _ = dataset.get_task_description(t)
                 print(f"  [{t}] {desc}: {c} 样本")
     
     # 4. 推理
@@ -608,16 +831,19 @@ def run_evaluation(
             print(f"  Median: {metrics['rot_error_median_deg']:.2f}°")
             print(f"  Std:    {metrics['rot_error_std_deg']:.2f}°")
             
-            print("\n✅ 成功率:")
-            print(f"  SR (1cm, 2°):  {metrics['sr_1cm_2deg']*100:.2f}%")
-            print(f"  SR (2cm, 5°):  {metrics['sr_2cm_5deg']*100:.2f}%  ← 推荐指标")
-            print(f"  SR (3cm, 10°): {metrics['sr_3cm_10deg']*100:.2f}%")
-            print(f"  SR (5cm, 15°): {metrics['sr_5cm_15deg']*100:.2f}%")
+        print("\n✅ 成功率:")
+        print(f"  SR (1cm, 2°):  {metrics['sr_1cm_2deg']*100:.2f}%")
+        print(f"  SR (2cm, 5°):  {metrics['sr_2cm_5deg']*100:.2f}%  ← 推荐指标")
+        print(f"  SR (5cm, 10°): {metrics['sr_5cm_10deg']*100:.2f}%")
+        #print(f"  SR (5cm, 15°): {metrics['sr_5cm_15deg']*100:.2f}%")
         
         print("\n📐 各维度 MSE:")
         for key in sorted([k for k in metrics.keys() if k.startswith('mse_')]):
             dim = key.replace('mse_', '')
             print(f"  {dim}: {metrics[key]:.6f}")
+        
+        # 打印异常数据统计
+        anomaly_stats.print_summary()
     
     # 7. 保存结果
     if output_dir is None:
@@ -657,7 +883,8 @@ def run_evaluation(
             "ade_cm": metrics.get('ade_mean_cm'),
             "rotation_error_deg": metrics.get('rot_error_mean_deg'),
             "success_rate_2cm_5deg": metrics.get('sr_2cm_5deg'),
-        }
+        },
+        "anomaly_stats": anomaly_stats.to_dict(),
     }
     
     output_path = output_dir / output_filename
