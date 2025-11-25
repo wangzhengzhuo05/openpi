@@ -1,7 +1,7 @@
 """
-Pi0 CALVIN 模型评估脚本 - 最终版 v2
+Pi0 CALVIN 模型评估脚本 - 正式版(请使用这个脚本进行任务)
 支持语言指令加载
-支持统计异常
+支持统计异常数据
 uv run evaluate_pi0_calvin.py \
     --checkpoint_dir /root/autodl-tmp/openpi/checkpoints/pi0_calvin_scratch/calvin_full/21000 \
     --dataset_path /root/autodl-tmp/huggingface/lerobot/Coil1987121/calvin_lerobot_task_ABCD_D_validation \
