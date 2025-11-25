@@ -1,0 +1,48 @@
+{
+  "metadata": {
+    "timestamp": "2025-11-25T14:24:52.648597",
+    "checkpoint_dir": "/root/autodl-tmp/openpi/checkpoints/pi0_calvin_scratch/calvin_full/21000",
+    "dataset_path": "/root/autodl-tmp/huggingface/lerobot/Coil1987121/calvin_lerobot_task_ABCD_D_validation",
+    "config_name": "pi0_calvin_scratch",
+    "num_samples": 5917,
+    "num_errors": 0,
+    "action_horizon": 10,
+    "inference_mode": "real",
+    "has_language_instructions": true
+  },
+  "metrics": {
+    "traj_mse": 1.0516041573336337,
+    "traj_mae": 0.2184551472091505,
+    "traj_rmse": 1.0254775264888225,
+    "pos_mse": 0.0004362413546214344,
+    "pos_rmse_cm": 2.0886391613235507,
+    "fde_mean_cm": 4.419906953561074,
+    "fde_median_cm": 3.4536582833629024,
+    "fde_std_cm": 3.3806422800000333,
+    "ade_mean_cm": 2.6093682635331095,
+    "ade_median_cm": 2.0780998696760555,
+    "rot_error_mean_deg": 42.90901706553078,
+    "rot_error_median_deg": 4.843087020696905,
+    "rot_error_std_deg": 52.49689801851119,
+    "rot_mse": 1.839980094317893,
+    "sr_1cm_2deg": 0.013351360486733141,
+    "sr_2cm_5deg": 0.12185229001183032,
+    "sr_3cm_10deg": 0.2585769815785026,
+    "sr_5cm_15deg": 0.43552475916849753,
+    "mse_x": 0.0007703472593821905,
+    "mse_y": 0.0002180007150685256,
+    "mse_z": 0.0003203760894135884,
+    "mse_qx": 6.68543762386209,
+    "mse_qy": 0.0013774140546182708,
+    "mse_qz": 0.12186389624678957,
+    "mse_qw": 0.5512414431079348
+  },
+  "summary": {
+    "trajectory_mse": 1.0516041573336337,
+    "position_mse": 0.0004362413546214344,
+    "fde_cm": 4.419906953561074,
+    "ade_cm": 2.6093682635331095,
+    "rotation_error_deg": 42.90901706553078,
+    "success_rate_2cm_5deg": 0.12185229001183032
+  }
+}
